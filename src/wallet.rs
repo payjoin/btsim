@@ -1,6 +1,6 @@
 use crate::{
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
-    Simulation,
+    Epoch, Simulation,
 };
 use bdk_coin_select::{
     metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, Drain, DrainWeights, Target,
@@ -170,7 +170,7 @@ impl<'a> WalletHandleMut<'a> {
 define_entity!(
     PaymentObligation,
     {
-        pub(crate) deadline: usize, // block height? time step?
+        pub(crate) deadline: Epoch, // block height? time step?
         pub(crate) amount: Amount,
         pub(crate) from: WalletId,
         pub(crate) to: WalletId,

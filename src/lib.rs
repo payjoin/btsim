@@ -111,6 +111,10 @@ enum CoinSelectionStrategy {
 // #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 // struct TxByFeerate(FeeRate, TxId);
 
+/// Wrapper type for timestep index
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
+pub(crate) struct Epoch(usize);
+
 #[derive(Debug)]
 struct SimulationBuilder {
     prng: ChaChaRng,
@@ -243,8 +247,8 @@ impl<'a> Simulation {
             amount: Amount::from_int_btc(20),
             from: wallets[0].id,
             to: wallets[1].id,
-            deadline: 2, // TODO 102
-                         // TODO coinbase maturity
+            deadline: Epoch(2), // TODO 102
+                                // TODO coinbase maturity
         };
         self.payment_data.push(payment);
         self.assert_invariants();
