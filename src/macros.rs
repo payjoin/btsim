@@ -97,7 +97,8 @@ macro_rules! define_entity_handle_mut {
                     Self { sim, id }
                 }
             }
-                    // Implement Deref to allow [<$base HandleMut>] to be used as [<$base Handle>]
+
+            // Implement Deref to allow [<$base HandleMut>] to be used as [<$base Handle>]
             impl<'a> std::ops::Deref for [<$base HandleMut>]<'a> {
                 type Target = [<$base Handle>]<'a>;
 
