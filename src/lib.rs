@@ -8,6 +8,8 @@ use bitcoin::{
 };
 use im::{OrdMap, OrdSet, Vector};
 use paste::paste;
+use rand::SeedableRng;
+use rand_chacha::ChaChaRng;
 
 // TODO use bitcoin::transaction::predict_weight(inputs: IntoIter<InputWeightPrediction>, output_lengths: IntoIter<u64>)
 
@@ -933,6 +935,7 @@ impl<'a> BlockHandle<'a> {
 define_entity_mut_updatable!(
     Wallet,
     {
+        id: WalletId,
         addresses: Vec<AddressId>,         // TODO split into internal/external?
         own_transactions: Vec<TxId>,       // transactions originating from this wallet
         last_wallet_info_id: WalletInfoId, // Monotone
@@ -1086,6 +1089,51 @@ impl<'a> WalletHandleMut<'a> {
     }
 }
 
+#[derive(Debug)]
+struct SimulationBuilder {
+    prng: ChaChaRng,
+    /// Number of wallets/agents in the simulation
+    num_wallets: usize,
+    /// Total number of epochs for the simulation
+    max_epochs: usize,
+    /// How many blocks are mined between epochs
+    block_interval: usize,
+}
+
+impl SimulationBuilder {
+    fn new_random(num_wallets: usize, max_epochs: usize, block_interval: usize) -> Self {
+        debug_assert!(num_wallets >= 2);
+        let chacha = ChaChaRng::from_rng(rand::thread_rng()).unwrap();
+        Self {
+            prng: chacha,
+            num_wallets,
+            max_epochs,
+            block_interval,
+        }
+    }
+
+    fn new(seed: u64, num_wallets: usize, max_epochs: usize, block_interval: usize) -> Self {
+        debug_assert!(num_wallets >= 2);
+        let chacha = ChaChaRng::seed_from_u64(seed);
+        Self {
+            prng: chacha,
+            num_wallets,
+            max_epochs,
+            block_interval,
+        }
+    }
+
+    fn build(self) -> Simulation {
+        let mut sim = Simulation::new();
+
+        for _ in 0..self.num_wallets {
+            sim.new_wallet();
+        }
+
+        sim
+    }
+}
+
 /// all entities are numbered sequentially
 #[derive(Debug, PartialEq, Eq, Default)] // TODO remove Default
 struct Simulation {
@@ -1174,6 +1222,7 @@ impl<'a> Simulation {
 
         let id = WalletId(self.wallet_data.len());
         self.wallet_data.push(WalletData {
+            id,
             last_wallet_info_id,
             addresses: Vec::default(),
             own_transactions: Vec::default(),
@@ -1278,14 +1327,12 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut sim = Simulation::new();
+        let mut sim = SimulationBuilder::new_random(2, 10, 1).build();
 
         sim.assert_invariants();
 
-        let alice = sim.new_wallet();
-        sim.assert_invariants();
-        let bob = sim.new_wallet();
-        sim.assert_invariants();
+        let alice = WalletId(0);
+        let bob = WalletId(1);
 
         let alice_coinbase_addr = alice.with_mut(&mut sim).new_address();
         sim.assert_invariants();
