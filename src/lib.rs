@@ -1,4 +1,3 @@
-use bdk_coin_select::{Target, TargetFee, TargetOutputs};
 use bitcoin::{Amount, Weight};
 use im::{OrdMap, OrdSet, Vector};
 use rand::{Rng, SeedableRng};
@@ -9,10 +8,10 @@ use crate::{
         BlockData, BlockHandle, BlockId, BlockInfo, BroadcastSetData, BroadcastSetHandleMut,
         BroadcastSetId, BroadcastSetInfo,
     },
-    transaction::{Input, Outpoint, Output, TxData, TxHandle, TxId, TxInfo},
+    transaction::{Outpoint, TxData, TxHandle, TxId, TxInfo},
     wallet::{
-        AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData, WalletId,
-        WalletInfo, WalletInfoId,
+        AddressData, PaymentObligationData, PaymentObligationId, WalletData, WalletId, WalletInfo,
+        WalletInfoId,
     },
 };
 
@@ -233,28 +232,30 @@ struct Simulation {
 
 impl<'a> Simulation {
     fn build_universe(&mut self) {
-        let mut wallets = self.wallet_data.clone();
+        let wallets = self.wallet_data.clone();
         let addresses = wallets
             .iter()
             .map(|w| w.id.with_mut(self).new_address())
             .collect::<Vec<_>>();
 
         // For now we just mine a coinbase transaction for each wallet
-        // TODO: randomize how many coinbase transactions are mined for each wallet.
         let mut i = 0;
-        for (wallet, address) in wallets.iter_mut().zip(addresses.iter()) {
-            let broadcast_set = BroadcastSetHandleMut {
-                id: BroadcastSetId(i),
-                sim: self,
-            };
-            let coinbase_tx = broadcast_set
+        for address in addresses.iter() {
+            let coinbases_to_receive = self.prng.gen_range(1..10);
+            for _ in 0..coinbases_to_receive {
+                let _ = BroadcastSetHandleMut {
+                    id: BroadcastSetId(i),
+                    sim: self,
+                }
                 .construct_block_template(Weight::MAX_BLOCK)
                 .mine(*address, self);
 
-            wallet.own_transactions.push(coinbase_tx.coinbase_tx().id);
+                // Do we need to track this here? or will it be tracked in the broadcast set update_wallets?
+                // wallet.own_transactions.push(coinbase_tx.coinbase_tx().id);
 
-            self.assert_invariants();
-            i += 1;
+                self.assert_invariants();
+                i += 1;
+            }
         }
 
         self.new_payment_obligation();
@@ -491,7 +492,11 @@ impl std::fmt::Display for Simulation {
             )?;
         }
 
-        writeln!(f, "\nPayment Obligations: {}", self.payment_data.len())?;
+        writeln!(
+            f,
+            "\nUnfulfilled Payment Obligations: {}",
+            self.payment_data.len()
+        )?;
         for (i, payment) in self.payment_data.iter().enumerate() {
             writeln!(f, "\nPayment {}:", i)?;
             writeln!(f, "  Amount: {}", payment.amount)?;
