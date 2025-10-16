@@ -158,6 +158,7 @@ impl SimulationBuilder {
             broadcast_set_data: Vec::new(),
             block_data: Vec::new(),
             current_epoch: Epoch(0),
+            block_interval: self.block_interval,
             max_epochs: Epoch(0),
             prng: ChaChaRng::from_rng(rand::thread_rng()).unwrap(),
             spends: OrdMap::new(),
@@ -223,6 +224,7 @@ struct Simulation {
     block_data: Vec<BlockData>,
     current_epoch: Epoch,
     max_epochs: Epoch,
+    block_interval: usize,
     prng: ChaChaRng,
 
     // secondary information (indexes)
@@ -284,13 +286,14 @@ impl<'a> Simulation {
 
             from_wallet.broadcast(std::iter::once(spend));
         }
-        let bx_id = BroadcastSetId(self.broadcast_set_data.len() - 1);
-        let bx_set_handle = bx_id.with_mut(self);
 
-        bx_set_handle
-            .construct_block_template(Weight::MAX_BLOCK)
-            .mine(self.miner_address(), self);
-
+        if self.current_epoch.0 % self.block_interval == 0 {
+            let bx_id = BroadcastSetId(self.broadcast_set_data.len() - 1);
+            let bx_set_handle = bx_id.with_mut(self);
+            bx_set_handle
+                .construct_block_template(Weight::MAX_BLOCK)
+                .mine(self.miner_address(), self);
+        }
 
         self.current_epoch = Epoch(self.current_epoch.0 + 1);
         self.assert_invariants();
