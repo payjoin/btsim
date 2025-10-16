@@ -275,17 +275,24 @@ impl<'a> Simulation {
             return;
         }
 
-        let payment_obligation = self.payment_data.first().expect("checked above").clone();
-        let mut from_wallet = payment_obligation.from.with_mut(self);
-        let spend = from_wallet
-            .fufill_payment_obligation()
-            .expect("Payment obligation should have atleast one value");
+        let payments = self.payment_data.clone();
+        for payment_obligation in payments.iter() {
+            let mut from_wallet = payment_obligation.from.with_mut(self);
+            let spend = from_wallet
+                .fufill_payment_obligation()
+                .expect("Payment obligation should have atleast one value");
 
-        let bset = from_wallet.broadcast(std::iter::once(spend));
-        bset.construct_block_template(Weight::MAX_BLOCK)
+            from_wallet.broadcast(std::iter::once(spend));
+        }
+        let bx_id = BroadcastSetId(self.broadcast_set_data.len() - 1);
+        let bx_set_handle = bx_id.with_mut(self);
+
+        bx_set_handle
+            .construct_block_template(Weight::MAX_BLOCK)
             .mine(self.miner_address(), self);
-        self.current_epoch = Epoch(self.current_epoch.0 + 1);
 
+
+        self.current_epoch = Epoch(self.current_epoch.0 + 1);
         self.assert_invariants();
     }
 
