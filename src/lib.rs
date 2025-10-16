@@ -10,8 +10,8 @@ use crate::{
     },
     transaction::{Outpoint, TxData, TxHandle, TxId, TxInfo},
     wallet::{
-        AddressData, PaymentObligationData, PaymentObligationId, WalletData, WalletId, WalletInfo,
-        WalletInfoId,
+        AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData, WalletId,
+        WalletInfo, WalletInfoId,
     },
 };
 
@@ -203,6 +203,9 @@ impl SimulationBuilder {
             sim.new_wallet();
         }
 
+        // Create one more wallet to simulate the "miners"
+        sim.new_wallet();
+
         sim
     }
 }
@@ -280,7 +283,7 @@ impl<'a> Simulation {
 
         let bset = from_wallet.broadcast(std::iter::once(spend));
         bset.construct_block_template(Weight::MAX_BLOCK)
-            .mine(payment_obligation.to, self);
+            .mine(self.miner_address(), self);
         self.current_epoch = Epoch(self.current_epoch.0 + 1);
 
         self.assert_invariants();
@@ -300,6 +303,11 @@ impl<'a> Simulation {
         BlockId(0)
     }
 
+    fn miner_address(&self) -> AddressId {
+        // The "miners" wallet is the last wallet in the simulation
+        AddressId(self.wallet_data.len() - 1)
+    }
+
     // TODO remove
     fn get_tx(&'a self, id: TxId) -> TxHandle<'a> {
         id.with(&self)
@@ -311,13 +319,14 @@ impl<'a> Simulation {
             // Not enough epochs left to create a payment obligation
             return;
         }
-        let max_wallets = self.wallet_data.len();
+        // The last wallet is the "miner"
+        let max_wallets = self.wallet_data.len() - 1;
         let from = self.prng.gen_range(0..max_wallets);
         let mut to = self.prng.gen_range(0..max_wallets);
         if to == from {
             to = (to + 1) % max_wallets;
         }
-        let amount = self.prng.gen_range(1..20);
+        let amount = self.prng.gen_range(1..5);
         let deadline = self.prng.gen_range(self.current_epoch.0..self.max_epochs.0);
         let to_addr = WalletId(to).with_mut(self).new_address();
         // First insert payment obligation into simulation
