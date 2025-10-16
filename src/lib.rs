@@ -1,5 +1,6 @@
 use bitcoin::{Amount, Weight};
 use im::{OrdMap, OrdSet, Vector};
+use petgraph::graph::{NodeIndex, UnGraph};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 
@@ -111,6 +112,20 @@ enum CoinSelectionStrategy {
 // #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 // struct TxByFeerate(FeeRate, TxId);
 
+#[derive(Debug)]
+// TODO: use WalletId instead of usize?
+struct PeerGraph(UnGraph<usize, ()>);
+
+impl PartialEq for PeerGraph {
+    fn eq(&self, other: &Self) -> bool {
+        todo!()
+        // self.0.node_count() == other.0.node_count()
+        //     && self.0.edge_count() == other.0.edge_count()
+    }
+}
+
+impl Eq for PeerGraph {}
+
 /// Wrapper type for timestep index
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
 pub(crate) struct Epoch(usize);
@@ -149,8 +164,26 @@ impl SimulationBuilder {
         }
     }
 
+    fn create_fully_connected_peer_graph(&self) -> PeerGraph {
+        let num_wallets = self.num_wallets;
+        let mut nodes: Vec<(usize, usize)> = Vec::new();
+        for i in 0..num_wallets {
+            for j in 0..num_wallets {
+                if i != j {
+                    nodes.push((i, j));
+                }
+            }
+        }
+        PeerGraph(UnGraph::<usize, ()>::from_edges(
+            nodes
+                .into_iter()
+                .map(|(i, j)| (NodeIndex::new(i), NodeIndex::new(j))),
+        ))
+    }
+
     fn build(self) -> Simulation {
         let mut sim = Simulation {
+            peer_graph: self.create_fully_connected_peer_graph(),
             wallet_data: Vec::new(),
             payment_data: Vec::new(),
             address_data: Vec::new(),
@@ -167,6 +200,7 @@ impl SimulationBuilder {
             tx_info: Vec::new(),
             broadcast_set_info: Vec::new(),
         };
+        println!("Peer graph: {:?}", sim.peer_graph);
         sim.max_epochs = Epoch(self.max_epochs);
         sim.prng = self.prng;
 
@@ -226,6 +260,7 @@ struct Simulation {
     max_epochs: Epoch,
     block_interval: usize,
     prng: ChaChaRng,
+    peer_graph: PeerGraph,
 
     // secondary information (indexes)
     spends: OrdMap<Outpoint, OrdSet<TxId>>,
