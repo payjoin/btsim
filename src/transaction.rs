@@ -1,5 +1,6 @@
 use crate::wallet::{AddressHandle, AddressId, WalletHandle, WalletHandleMut};
 use crate::Simulation;
+use bitcoin::consensus::Decodable;
 use bitcoin::transaction::{predict_weight, InputWeightPrediction};
 use bitcoin::{Amount, Weight};
 use bitcoin::{FeeRate, ScriptBuf, WitnessProgram};
@@ -17,6 +18,26 @@ define_entity!(
     }
 );
 
+impl From<TxData> for lattice_psbt::UnOrderedTransaction {
+    fn from(tx: TxData) -> Self {
+        let mut psbt = lattice_psbt::UnOrderedTransaction::default();
+        for input in tx.inputs.iter() {
+            psbt.add_input(lattice_psbt::Vin::from(*input));
+        }
+        for output in tx.outputs.iter() {
+            psbt.add_output(lattice_psbt::Vout::from(*output));
+        }
+        psbt
+    }
+}
+
+impl From<TxId> for bitcoin::Txid {
+    fn from(txid: TxId) -> Self {
+        let txid_bytes = txid.0.to_le_bytes();
+        bitcoin::Txid::consensus_decode(&mut &txid_bytes[..]).unwrap()
+    }
+}
+
 // TODO rename to OutputId?
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub(crate) struct Outpoint {
@@ -33,11 +54,23 @@ impl<'a> Outpoint {
     }
 }
 
+impl From<Outpoint> for bitcoin::OutPoint {
+    fn from(outpoint: Outpoint) -> Self {
+        bitcoin::OutPoint::new(outpoint.txid.into(), outpoint.index as u32)
+    }
+}
+
 // TODO rename to InputData?
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) struct Input {
     pub(crate) outpoint: Outpoint, // sequence,
                                    // witness?
+}
+
+impl From<Input> for lattice_psbt::Vin {
+    fn from(input: Input) -> Self {
+        lattice_psbt::Vin::default().with_outpoint(input.outpoint.into())
+    }
 }
 
 pub(crate) struct InputId {
@@ -92,6 +125,12 @@ impl From<Output> for bitcoin::transaction::TxOut {
             value: o.amount,
             script_pubkey,
         }
+    }
+}
+
+impl From<Output> for lattice_psbt::Vout {
+    fn from(output: Output) -> Self {
+        lattice_psbt::Vout::from_output(&bitcoin::transaction::TxOut::from(output))
     }
 }
 
