@@ -612,6 +612,11 @@ impl std::fmt::Display for Simulation {
             }
         }
 
+        writeln!(f, "\nSpends: {}", self.spends.len())?;
+        for (i, spend) in self.spends.iter().enumerate() {
+            writeln!(f, "Spend {}: {:?}", i, spend)?;
+        }
+
         writeln!(f, "\nBlocks: {}", self.block_data.len())?;
         writeln!(f, "Broadcast Sets: {}", self.broadcast_set_data.len())?;
 

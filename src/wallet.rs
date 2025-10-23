@@ -331,7 +331,7 @@ impl<'a> WalletHandleMut<'a> {
         let last_wallet_info_id = self.data().last_wallet_info_id;
         let mut last_wallet_info = self.sim.wallet_info[last_wallet_info_id.0].clone();
         // TODO: refactor to use a map?
-        // TODO: currently we are only collaborating once per sim run 
+        // TODO: currently we are only collaborating once per sim run
         if last_wallet_info.collabroation_spends.is_empty() {
             // For now lets reach out to recepient to batch this payment
             // Later we can reach out to the entire peer graph to form a coalition
