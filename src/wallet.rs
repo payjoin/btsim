@@ -193,7 +193,7 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     /// stateless utility function to construct a transaction for a given payment obligation
-    fn construct_payment_transaction(
+    fn construct_transaction_template(
         &self,
         obligation: &PaymentObligationData,
         change_addr: &AddressId,
@@ -259,7 +259,7 @@ impl<'a> WalletHandleMut<'a> {
             let change_addr = self.new_address();
             let to_address = payment_obligation.to.with_mut(self.sim).new_address();
             let mut tx_template =
-                self.construct_payment_transaction(&payment_obligation, &change_addr, &to_address);
+                self.construct_transaction_template(&payment_obligation, &change_addr, &to_address);
             tx_template.inputs.extend(cospend.inputs.iter().cloned());
             tx_template.outputs.extend(cospend.outputs.iter().cloned());
 
@@ -280,7 +280,7 @@ impl<'a> WalletHandleMut<'a> {
         let change_addr = self.new_address();
         let to_address = payment_obligation.to.with_mut(self.sim).new_address();
         let tx_template =
-            self.construct_payment_transaction(payment_obligation, &change_addr, &to_address);
+            self.construct_transaction_template(payment_obligation, &change_addr, &to_address);
         let cospend = CospendData {
             id: cospend_id,
             inputs: tx_template.inputs.clone(),
@@ -343,7 +343,7 @@ impl<'a> WalletHandleMut<'a> {
         let to_wallet = payment_obligation.to;
         let to_address = to_wallet.with_mut(self.sim).new_address();
         let tx_template =
-            self.construct_payment_transaction(payment_obligation, &change_addr, &to_address);
+            self.construct_transaction_template(payment_obligation, &change_addr, &to_address);
 
         let tx_id = self.spend_tx(tx_template);
         self.data_mut()
