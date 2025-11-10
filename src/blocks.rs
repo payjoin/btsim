@@ -94,9 +94,11 @@ impl<'a> BroadcastSetHandleMut<'a> {
             // also remove conflicting transactions
             // TODO refactor tx.with(self.sim).spent_coins() impl Iterator Outppoint?
             for input in &tx.with(self.sim).data().inputs {
-                for conflicting_tx in self.sim.spends[&input.outpoint]
-                    .without(tx)
-                    .intersection(unconfirmed_txs.clone())
+                let spends = self.sim.spends[&input.outpoint]
+                    .iter()
+                    .map(|input_id| input_id.txid)
+                    .collect::<OrdSet<TxId>>();
+                for conflicting_tx in spends.without(&tx).intersection(unconfirmed_txs.clone())
                 // FIXME pr to im, unnecessary clone
                 {
                     unconfirmed_txs.remove(&conflicting_tx);

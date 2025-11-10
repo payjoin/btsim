@@ -310,7 +310,8 @@ impl<'a> WalletHandleMut<'a> {
             // TODO: this should be configurable
             // Right now the wallets are patient for the most part
             if time_left <= 2 {
-                txs_to_broadcast.push(self.handle_payment_obligations(&payment_obligation));
+                let tx_id = self.handle_payment_obligations(&payment_obligation);
+                txs_to_broadcast.push(tx_id);
                 // TODO: if we are handling a payment obligation, we should not register inputs. This doesn't have to be the case but doing this for now bc its easier to debug
                 return;
             }
@@ -349,6 +350,7 @@ impl<'a> WalletHandleMut<'a> {
         self.data_mut()
             .handled_payment_obligations
             .insert(payment_obligation_id);
+        self.broadcast(vec![tx_id]);
         tx_id
     }
 

@@ -12,10 +12,10 @@ use crate::{
     cospend::{CospendData, CospendId},
     economic_graph::EconomicGraph,
     message::{MessageData, MessageId},
-    transaction::{Outpoint, TxData, TxHandle, TxId, TxInfo},
+    transaction::{InputId, Outpoint, TxData, TxHandle, TxId, TxInfo},
     wallet::{
-        AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData, WalletId,
-        WalletInfo, WalletInfoId,
+        AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData,
+        WalletHandle, WalletId, WalletInfo, WalletInfoId,
     },
 };
 
@@ -24,6 +24,7 @@ mod macros;
 mod blocks;
 mod cospend;
 mod economic_graph;
+mod graphviz;
 mod message;
 mod transaction;
 mod wallet;
@@ -281,7 +282,8 @@ struct Simulation {
     cospends: Vec<CospendData>,
 
     // secondary information (indexes)
-    spends: OrdMap<Outpoint, OrdSet<TxId>>,
+    /// Map of outpoints to the set of (txid, input index) pairs that spend them
+    spends: OrdMap<Outpoint, OrdSet<InputId>>,
     wallet_info: Vec<WalletInfo>,
     block_info: Vec<BlockInfo>,
     tx_info: Vec<TxInfo>,
@@ -384,7 +386,6 @@ impl<'a> Simulation {
         }
 
         for (from, to) in payment_pairs {
-            println!("From: {:?}, To: {:?}", from, to);
             // TODO: should be a configurable or dependent on the balance of each wallet?
             let deadline = prng.gen_range(self.current_timestep.0 + 1..self.max_timestep.0);
             // First insert payment obligation into simulation
@@ -454,16 +455,22 @@ impl<'a> Simulation {
 
         // TODO check transaction validity, calculate input values, feerate, weight
 
-        for i in &tx.inputs {
-            if !self.spends.contains_key(&i.outpoint) {
-                self.spends.insert(i.outpoint, OrdSet::<TxId>::default());
+        for (i, input) in tx.inputs.iter().enumerate() {
+            if !self.spends.contains_key(&input.outpoint) {
+                self.spends
+                    .insert(input.outpoint, OrdSet::<InputId>::default());
             }
-            self.spends[&i.outpoint].insert(txid);
+            self.spends[&input.outpoint].insert(InputId { txid, index: i });
         }
         self.tx_data.push(tx);
         self.tx_info.push(tx_info);
 
         txid
+    }
+
+    fn get_wallet_handles(&'a self) -> impl Iterator<Item = WalletHandle<'a>> {
+        let max_id = self.wallet_data.len();
+        (0..max_id).map(|id| WalletId(id).with(self))
     }
 
     fn new_block(&'a mut self, data: BlockData, info: BlockInfo) -> BlockHandle<'a> {
@@ -604,6 +611,7 @@ impl std::fmt::Display for Simulation {
 #[cfg(test)]
 mod tests {
     use bdk_coin_select::{Target, TargetFee, TargetOutputs};
+    use graphviz_rust::{cmd::Format, exec, printer::PrinterContext};
     use im::{ordset, vector};
 
     use crate::transaction::{Input, Output};
@@ -619,6 +627,17 @@ mod tests {
         sim.assert_invariants();
 
         println!("{}", sim);
+
+        let graph = sim.draw_tx_graph(sim.tx_data.iter().enumerate().map(|(i, _)| TxId(i)));
+
+        let graph_svg = exec(
+            graph,
+            &mut PrinterContext::default(),
+            vec![Format::Svg.into()],
+        )
+        .unwrap();
+
+        std::fs::write("graph.svg", graph_svg).unwrap();
 
         // TODO: re-enable these assertions
         // let spend = alice.with_mut(&mut sim).data().own_transactions[1];

@@ -75,6 +75,7 @@ impl From<Input> for lattice_psbt::Vin {
     }
 }
 
+#[derive(Debug, PartialEq, Clone, Copy, Eq, PartialOrd, Ord)]
 pub(crate) struct InputId {
     pub(crate) txid: TxId,
     pub(crate) index: usize,
@@ -279,7 +280,7 @@ impl TxInfo {
         TxInfo { fee: fees, weight }
     }
 
-    fn feerate(self) -> FeeRate {
+    pub(crate) fn feerate(self) -> FeeRate {
         self.fee / self.weight
     }
 }
