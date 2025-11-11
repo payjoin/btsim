@@ -239,8 +239,14 @@ impl<'a> TxHandle<'a> {
         })
     }
 
+    pub(crate) fn is_confirmed(&self) -> bool {
+        self.sim
+            .block_data
+            .iter()
+            .any(|block| block.confirmed_txs.contains(&self.id))
+    }
+
     // TODO fn prevouts(self) -> impl IntoIterator??
-    // TODO confirmed
     // TODO previous txs
 }
 
