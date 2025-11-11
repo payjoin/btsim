@@ -252,6 +252,9 @@ impl<'a> WalletHandleMut<'a> {
         }
         // TODO Check the cospend validity
         let cospend = cospend.with(self.sim).data().clone();
+        if cospend.valid_till < self.sim.current_timestep {
+            return None;
+        }
         // if we have a payment obligation then lets batch it with this cospend
         if let Some(payment_obligation_id) = self.next_payment_obligation() {
             let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
