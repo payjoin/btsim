@@ -149,30 +149,45 @@ struct SimulationBuilder {
     /// Number of wallets/agents in the simulation
     num_wallets: usize,
     /// Total number of timesteps for the simulation
-    max_timesteps: usize,
+    max_timestep: TimeStep,
     /// How many blocks are mined between timesteps
     block_interval: usize,
+    /// Number of payment obligations to create
+    num_payment_obligations: usize,
 }
 
 impl SimulationBuilder {
-    fn new_random(num_wallets: usize, max_timesteps: usize, block_interval: usize) -> Self {
+    fn new_random(
+        num_wallets: usize,
+        max_timestep: TimeStep,
+        block_interval: usize,
+        num_payment_obligations: usize,
+    ) -> Self {
         debug_assert!(num_wallets >= 2);
         let seed = rand::thread_rng().gen_range(0..u64::MAX);
         Self {
             seed,
             num_wallets,
-            max_timesteps,
+            max_timestep,
             block_interval,
+            num_payment_obligations,
         }
     }
 
-    fn new(seed: u64, num_wallets: usize, max_timesteps: usize, block_interval: usize) -> Self {
+    fn new(
+        seed: u64,
+        num_wallets: usize,
+        max_timestep: TimeStep,
+        block_interval: usize,
+        num_payment_obligations: usize,
+    ) -> Self {
         debug_assert!(num_wallets >= 2);
         Self {
             seed,
             num_wallets,
-            max_timesteps,
+            max_timestep,
             block_interval,
+            num_payment_obligations,
         }
     }
 
@@ -205,8 +220,6 @@ impl SimulationBuilder {
             broadcast_set_data: Vec::new(),
             block_data: Vec::new(),
             current_timestep: TimeStep(0),
-            block_interval: self.block_interval,
-            max_timestep: TimeStep(0),
             prng_factory,
             spends: OrdMap::new(),
             wallet_info: Vec::new(),
@@ -217,8 +230,13 @@ impl SimulationBuilder {
             cospends: Vec::new(),
             last_processed_message: MessageId(0),
             economic_graph: EconomicGraph::new(3, economic_graph_prng),
+            config: SimulationConfig {
+                num_wallets: self.num_wallets,
+                max_timestep: self.max_timestep,
+                block_interval: self.block_interval,
+                num_payment_obligations: self.num_payment_obligations,
+            },
         };
-        sim.max_timestep = TimeStep(self.max_timesteps);
 
         // genesis block has empty coinbase
         sim.tx_data.push(TxData::default());
@@ -262,6 +280,14 @@ impl SimulationBuilder {
     }
 }
 
+#[derive(Debug)]
+struct SimulationConfig {
+    num_wallets: usize,
+    max_timestep: TimeStep,
+    block_interval: usize,
+    num_payment_obligations: usize,
+}
+
 /// all entities are numbered sequentially
 #[derive(Debug)]
 struct Simulation {
@@ -274,11 +300,10 @@ struct Simulation {
     // TODO mempools, = orderings / replacements of broadcast_sets
     block_data: Vec<BlockData>,
     current_timestep: TimeStep,
-    max_timestep: TimeStep,
-    block_interval: usize,
     prng_factory: PrngFactory,
     peer_graph: PeerGraph,
     economic_graph: EconomicGraph<ChaChaRng>,
+    config: SimulationConfig,
     /// Append only vector of messages
     messages: Vec<MessageData>,
     cospends: Vec<CospendData>,
@@ -333,7 +358,7 @@ impl<'a> Simulation {
             wallet_id.with_mut(self).wake_up();
         }
 
-        if self.current_timestep.0 % self.block_interval == 0 {
+        if self.current_timestep.0 % self.config.block_interval == 0 {
             println!("Mining block");
             let bx_id = BroadcastSetId(self.broadcast_set_data.len() - 1);
             let bx_set_handle = bx_id.with_mut(self);
@@ -346,7 +371,7 @@ impl<'a> Simulation {
     }
 
     fn run(&mut self) {
-        let max_timesteps = self.max_timestep;
+        let max_timesteps = self.config.max_timestep;
         while self.current_timestep < max_timesteps {
             println!("Timestep {}", self.current_timestep.0);
             self.tick();
@@ -377,14 +402,14 @@ impl<'a> Simulation {
     fn new_payment_obligation(&mut self) {
         let mut prng = self.prng_factory.generate_prng();
         let payment_pairs = self.economic_graph.next_ordered_payment_pairs();
-        if self.max_timestep.0 - self.current_timestep.0 < 2 {
+        if self.config.max_timestep.0 - self.current_timestep.0 < 2 {
             // Not enough timesteps left to create a payment obligation
             return;
         }
 
         for (from, to) in payment_pairs {
             // TODO: should be a configurable or dependent on the balance of each wallet?
-            let deadline = prng.gen_range(self.current_timestep.0 + 1..self.max_timestep.0);
+            let deadline = prng.gen_range(self.current_timestep.0 + 1..self.config.max_timestep.0);
             // First insert payment obligation into simulation
             let payment_obligation_id = PaymentObligationId(self.payment_data.len());
             self.payment_data.push(PaymentObligationData {
@@ -541,7 +566,7 @@ impl std::fmt::Display for Simulation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== Simulation State ===")?;
         writeln!(f, "Current Timestep: {}", self.current_timestep.0)?;
-        writeln!(f, "Max Timesteps: {}", self.max_timestep.0)?;
+        writeln!(f, "Max Timesteps: {}", self.config.max_timestep.0)?;
         writeln!(f, "\nWallets: {}", self.wallet_data.len())?;
 
         for (i, wallet) in self.wallet_data.iter().enumerate() {
@@ -627,7 +652,7 @@ mod tests {
 
     #[test]
     fn test_universe() {
-        let mut sim = SimulationBuilder::new(42, 2, 20, 1).build();
+        let mut sim = SimulationBuilder::new(42, 2, TimeStep(20), 1, 10).build();
         sim.assert_invariants();
         sim.build_universe();
         sim.run();
@@ -674,7 +699,7 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut sim = SimulationBuilder::new(42, 2, 10, 1).build();
+        let mut sim = SimulationBuilder::new(42, 2, TimeStep(20), 1, 10).build();
 
         sim.assert_invariants();
 
