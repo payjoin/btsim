@@ -253,8 +253,7 @@ impl<'a> WalletHandleMut<'a> {
         // TODO Check the cospend validity
         let cospend = cospend.with(self.sim).data().clone();
         // if we have a payment obligation then lets batch it with this cospend
-        let payment_obligation_id = self.next_payment_obligation();
-        if let Some(payment_obligation_id) = payment_obligation_id {
+        if let Some(payment_obligation_id) = self.next_payment_obligation() {
             let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
             let change_addr = self.new_address();
             let to_address = payment_obligation.to.with_mut(self.sim).new_address();
@@ -269,10 +268,11 @@ impl<'a> WalletHandleMut<'a> {
             self.data_mut()
                 .handled_payment_obligations
                 .insert(payment_obligation_id);
-            Some(tx_id)
-        } else {
-            None
+            self.data_mut().participating_cospends.insert(cospend.id);
+            return Some(tx_id);
         }
+
+        None
     }
 
     fn create_cospend(&mut self, payment_obligation: &PaymentObligationData) -> CospendData {
@@ -287,6 +287,7 @@ impl<'a> WalletHandleMut<'a> {
             outputs: tx_template.outputs.clone(),
             valid_till: payment_obligation.deadline,
         };
+        self.data_mut().participating_cospends.insert(cospend_id);
         cospend
     }
 
