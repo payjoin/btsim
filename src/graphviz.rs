@@ -6,10 +6,7 @@ use graphviz_rust::{
 };
 use im::OrdSet;
 
-use crate::{
-    transaction::{TxHandle, TxId},
-    Simulation,
-};
+use crate::{transaction::TxHandle, Simulation};
 
 // TODO make overridable? builder pattern?
 pub fn new(name: &str) -> Graph {
@@ -100,36 +97,21 @@ impl Simulation {
             "gold", "silver",
         ];
 
-        // TODO: iterate over all transactions, for every input and output and assign colors based on the wallet id
-        for wallet in self.get_wallet_handles() {
-            for txid in wallet
-                .info()
-                .broadcast_transactions
-                .iter()
-                .chain(wallet.info().received_transactions.iter())
-                .copied()
-                .collect::<OrdSet<TxId>>()
-            {
-                let tx = txid.with(self);
-                let inputs = tx
-                    .inputs()
-                    .filter(|input| input.prevout().wallet().id == wallet.id);
-                let outputs = tx
-                    .outputs()
-                    .filter(|output| output.wallet().id == wallet.id);
-
-                let color = colors[wallet.id.0 % colors.len()];
-                for input in inputs {
-                    let input_id = format!("tx_{}_input_{}", txid.0, input.id.index);
-                    graph.add_stmt(stmt!(node!(input_id; attr!("fillcolor", color))));
-                }
-                for output in outputs {
-                    let output_id = format!("tx_{}_output_{}", txid.0, output.outpoint.index);
-                    graph.add_stmt(stmt!(node!(output_id; attr!("fillcolor", color))));
-                }
-            }
+        for tx in txs.iter() {
+            let tx = tx.with(self);
+            tx.inputs().for_each(|input| {
+                let input_id = format!("tx_{}_input_{}", tx.id.0, input.id.index);
+                let wallet_id = input.prevout().wallet().id;
+                let color = colors[wallet_id.0 % colors.len()];
+                graph.add_stmt(stmt!(node!(input_id; attr!("fillcolor", color))));
+            });
+            tx.outputs().for_each(|output| {
+                let output_id = format!("tx_{}_output_{}", tx.id.0, output.outpoint.index);
+                let wallet_id = output.wallet().id;
+                let color = colors[wallet_id.0 % colors.len()];
+                graph.add_stmt(stmt!(node!(output_id; attr!("fillcolor", color))));
+            });
         }
-
         // FIXME refactor (unconfirmed utxo query method)
         let last_block = self.block_info.last().unwrap();
         let last_bx = self.broadcast_set_info.last().unwrap();
