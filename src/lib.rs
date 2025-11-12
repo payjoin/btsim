@@ -672,30 +672,17 @@ mod tests {
 
         std::fs::write("graph.svg", graph_svg).unwrap();
 
-        // TODO: re-enable these assertions
-        // let spend = alice.with_mut(&mut sim).data().own_transactions[1];
-
-        // assert_eq!(
-        //     alice.with(&sim).info().unconfirmed_spends,
-        //     OrdSet::from_iter(coinbase_tx.with(&sim).outpoints())
-        // );
-
-        // assert_eq!(
-        //     alice.with(&sim).info().unconfirmed_txos,
-        //     OrdSet::from_iter(spend.with(&sim).outpoints().skip(1))
-        // );
-
-        // assert_eq!(
-        //     bob.with(&sim).info().unconfirmed_txos,
-        //     OrdSet::from_iter(spend.with(&sim).outpoints().take(1))
-        // );
-
-        // assert_eq!(
-        //     alice.with(&sim).info().broadcast_transactions,
-        //     vector![spend]
-        // );
-
-        // assert!(bob.with(&sim).info().received_transactions.contains(&spend));
+        // Lets check the simulation state after the run
+        // Specifically how many payment obligations we're missed
+        // And how many were created in a cospend
+        let mut missed_payment_obligation = std::collections::HashMap::<WalletId, usize>::new();
+        sim.get_wallet_handles().for_each(|w| {
+            let handled_payment_obligations = w.data().handled_payment_obligations.clone();
+            let payment_obligations = w.info().payment_obligations.clone();
+            let union = handled_payment_obligations.union(payment_obligations);
+            missed_payment_obligation.insert(w.data().id, union.len());
+        });
+        println!("Missed payment obligations: {:?}", missed_payment_obligation);
     }
 
     #[test]
