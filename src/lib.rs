@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_universe() {
-        let mut sim = SimulationBuilder::new(42, 3, TimeStep(20), 1, 10).build();
+        let mut sim = SimulationBuilder::new(42, 5, TimeStep(50), 1, 20).build();
         sim.assert_invariants();
         sim.build_universe();
         sim.run();

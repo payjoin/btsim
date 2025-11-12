@@ -1,3 +1,4 @@
+use colorous::PAIRED;
 use graphviz_rust::{
     dot_generator::{attr, edge, graph, id, node, node_id, stmt, subgraph},
     dot_structures::{
@@ -89,26 +90,21 @@ impl Simulation {
             }
         }
 
-        // TODO: Replace with proper catagorical color palette, e.g tableau color palette
-        // https://docs.rs/colorous/latest/colorous/#categorical
-        let colors = [
-            "red", "green", "blue", "yellow", "purple", "orange", "brown", "gray", "pink", "lime",
-            "teal", "indigo", "violet", "magenta", "cyan", "maroon", "navy", "olive", "coral",
-            "gold", "silver",
-        ];
-
         for tx in txs.iter() {
             let tx = tx.with(self);
             tx.inputs().for_each(|input| {
                 let input_id = format!("tx_{}_input_{}", tx.id.0, input.id.index);
                 let wallet_id = input.prevout().wallet().id;
-                let color = colors[wallet_id.0 % colors.len()];
+                let color =
+                    format!("\"#{:x}\"", PAIRED[wallet_id.0 % PAIRED.len()]).to_ascii_uppercase();
                 graph.add_stmt(stmt!(node!(input_id; attr!("fillcolor", color))));
             });
             tx.outputs().for_each(|output| {
                 let output_id = format!("tx_{}_output_{}", tx.id.0, output.outpoint.index);
                 let wallet_id = output.wallet().id;
-                let color = colors[wallet_id.0 % colors.len()];
+                let color =
+                    format!("\"#{:x}\"", PAIRED[wallet_id.0 % PAIRED.len()]).to_ascii_uppercase();
+
                 graph.add_stmt(stmt!(node!(output_id; attr!("fillcolor", color))));
             });
         }
