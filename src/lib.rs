@@ -144,7 +144,7 @@ struct PeerGraph(UnGraph<usize, ()>);
 pub(crate) struct TimeStep(usize);
 
 #[derive(Debug)]
-struct SimulationBuilder {
+pub struct SimulationBuilder {
     seed: u64,
     /// Number of wallets/agents in the simulation
     num_wallets: usize,
@@ -157,9 +157,9 @@ struct SimulationBuilder {
 }
 
 impl SimulationBuilder {
-    fn new_random(
+    pub fn new_random(
         num_wallets: usize,
-        max_timestep: TimeStep,
+        max_timestep: usize,
         block_interval: usize,
         num_payment_obligations: usize,
     ) -> Self {
@@ -168,16 +168,16 @@ impl SimulationBuilder {
         Self {
             seed,
             num_wallets,
-            max_timestep,
+            max_timestep: TimeStep(max_timestep),
             block_interval,
             num_payment_obligations,
         }
     }
 
-    fn new(
+    pub fn new(
         seed: u64,
         num_wallets: usize,
-        max_timestep: TimeStep,
+        max_timestep: usize,
         block_interval: usize,
         num_payment_obligations: usize,
     ) -> Self {
@@ -185,7 +185,7 @@ impl SimulationBuilder {
         Self {
             seed,
             num_wallets,
-            max_timestep,
+            max_timestep: TimeStep(max_timestep),
             block_interval,
             num_payment_obligations,
         }
@@ -208,7 +208,7 @@ impl SimulationBuilder {
         ))
     }
 
-    fn build(self) -> Simulation {
+    pub fn build(self) -> Simulation {
         let mut prng_factory = PrngFactory::new(self.seed);
         let economic_graph_prng = prng_factory.generate_prng();
         let mut sim = Simulation {
@@ -290,7 +290,7 @@ struct SimulationConfig {
 
 /// all entities are numbered sequentially
 #[derive(Debug)]
-struct Simulation {
+pub struct Simulation {
     // primary information
     wallet_data: Vec<WalletData>,
     payment_data: Vec<PaymentObligationData>,
@@ -319,7 +319,7 @@ struct Simulation {
 }
 
 impl<'a> Simulation {
-    fn build_universe(&mut self) {
+    pub fn build_universe(&mut self) {
         let mut prng = self.prng_factory.generate_prng();
         let wallets = self.wallet_data.clone();
         let addresses = wallets
@@ -349,6 +349,16 @@ impl<'a> Simulation {
         self.assert_invariants();
     }
 
+    pub fn run(&mut self) {
+        let max_timesteps = self.config.max_timestep;
+        while self.current_timestep < max_timesteps {
+            println!("Timestep {}", self.current_timestep.0);
+            self.tick();
+            // TODO: call this only in debug / testmode?
+            self.assert_invariants();
+        }
+    }
+
     fn tick(&mut self) {
         let wallet_ids = self.wallet_data.iter().map(|w| w.id).collect::<Vec<_>>();
         for wallet_id in wallet_ids.iter() {
@@ -365,16 +375,6 @@ impl<'a> Simulation {
         }
 
         self.current_timestep = TimeStep(self.current_timestep.0 + 1);
-    }
-
-    fn run(&mut self) {
-        let max_timesteps = self.config.max_timestep;
-        while self.current_timestep < max_timesteps {
-            println!("Timestep {}", self.current_timestep.0);
-            self.tick();
-            // TODO: call this only in debug / testmode?
-            self.assert_invariants();
-        }
     }
 
     fn genesis_block(&self) -> BlockId {
@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn test_universe() {
-        let mut sim = SimulationBuilder::new(42, 5, TimeStep(20), 1, 10).build();
+        let mut sim = SimulationBuilder::new(42, 5, 20, 1, 10).build();
         sim.assert_invariants();
         sim.build_universe();
         sim.run();
@@ -698,8 +698,8 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut sim = SimulationBuilder::new(42, 2, TimeStep(20), 1, 10).build();
-
+        
+        let mut sim = SimulationBuilder::new(42, 2, 20, 1, 10).build();
         sim.assert_invariants();
 
         let alice = sim.new_wallet();

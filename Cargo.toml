@@ -5,6 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+name = "btsim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "btsim"
+path = "src/main.rs"
+
 [dependencies]
 bdk_coin_select = "0.3.0"
 bitcoin = "0.32.1"
@@ -20,3 +28,4 @@ rustworkx-core = "0.17.1"
 colorous = "1.0.16"
 graphalgs = "0.2.0"
 graphviz-rust = "0.9.6"
+clap = { version = "4.5.51", features = ["derive"] }
