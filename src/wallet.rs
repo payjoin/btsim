@@ -13,8 +13,6 @@ use bdk_coin_select::{
 use bitcoin::{transaction::InputWeightPrediction, Amount};
 use im::{OrdSet, Vector};
 
-const PAYMENT_OBLIGATION_DEADLINE_THRESHOLD: f64 = 2.0;
-
 use crate::transaction::*;
 
 define_entity_mut_updatable!(
@@ -276,7 +274,7 @@ impl<'a> WalletHandleMut<'a> {
                     .info()
                     .payment_obligation_to_cospend
                     .contains_key(payment_obligation_id)
-                    || anxiety_factor <= PAYMENT_OBLIGATION_DEADLINE_THRESHOLD
+                    || anxiety_factor <= self.sim.config.payment_obligation_deadline_threshold
             })
             .next()
             .cloned()
@@ -367,7 +365,7 @@ impl<'a> WalletHandleMut<'a> {
             // TODO: this should be configurable
             // Right now the wallets are patient for the most part
             if self.deadline_anxiety(payment_obligation.deadline.0 as i32)
-                <= PAYMENT_OBLIGATION_DEADLINE_THRESHOLD
+                <= self.sim.config.payment_obligation_deadline_threshold
             {
                 self.handle_payment_obligations(&payment_obligation);
                 // TODO: if we are handling a payment obligation, we should not register inputs. This doesn't have to be the case but doing this for now bc its easier to debug
