@@ -12,7 +12,6 @@ use crate::{
         BlockData, BlockHandle, BlockId, BlockInfo, BroadcastSetData, BroadcastSetHandleMut,
         BroadcastSetId, BroadcastSetInfo,
     },
-    cospend::{CospendData, CospendId},
     economic_graph::EconomicGraph,
     message::{MessageData, MessageId},
     transaction::{InputId, Outpoint, TxData, TxHandle, TxId, TxInfo},
@@ -25,7 +24,6 @@ use crate::{
 #[macro_use]
 mod macros;
 mod blocks;
-mod cospend;
 mod economic_graph;
 mod graphviz;
 mod message;
@@ -234,7 +232,6 @@ impl SimulationBuilder {
             tx_info: Vec::new(),
             broadcast_set_info: Vec::new(),
             messages: Vec::new(),
-            cospends: Vec::new(),
             economic_graph: EconomicGraph::new(3, economic_graph_prng),
             config: SimulationConfig {
                 num_wallets: self.num_wallets,
@@ -314,7 +311,6 @@ pub struct Simulation {
     config: SimulationConfig,
     /// Append only vector of messages
     messages: Vec<MessageData>,
-    cospends: Vec<CospendData>,
 
     // secondary information (indexes)
     /// Map of outpoints to the set of (txid, input index) pairs that spend them
@@ -456,8 +452,8 @@ impl<'a> Simulation {
             unconfirmed_txos: OrdSet::<Outpoint>::default(),
             confirmed_utxos: OrdSet::<Outpoint>::default(),
             unconfirmed_spends: OrdSet::<Outpoint>::default(),
-            unconfirmed_txos_in_cospends: HashMap::<Outpoint, CospendId>::default(),
-            payment_obligation_to_cospend: HashMap::<PaymentObligationId, CospendId>::default(),
+            unconfirmed_txos_in_cospends: HashMap::<Outpoint, MessageId>::default(),
+            payment_obligation_to_cospend: HashMap::<PaymentObligationId, MessageId>::default(),
             txid_to_handle_payment_obligation: HashMap::<TxId, PaymentObligationId>::default(),
             handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
         });
@@ -469,7 +465,7 @@ impl<'a> Simulation {
             addresses: Vec::default(),
             own_transactions: Vec::default(),
             last_processed_message: MessageId(0),
-            participating_cospends: OrdSet::<CospendId>::default(),
+            participating_cospends: OrdSet::<MessageId>::default(),
         });
         id
     }
@@ -631,11 +627,6 @@ impl std::fmt::Display for Simulation {
                 "\nMessage {}: From: Wallet {}, To: Wallet {:?}, Message Type: {:?}",
                 i, message.from.0, message.to, message.message
             )?;
-        }
-
-        writeln!(f, "\nCospends: {}", self.cospends.len())?;
-        for (i, cospend) in self.cospends.iter().enumerate() {
-            writeln!(f, "Cospend {}: {:?}", i, cospend)?;
         }
 
         writeln!(f, "\nSpends: {}", self.spends.len())?;

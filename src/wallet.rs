@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
-    cospend::{CospendData, CospendId},
-    message::{InitiateCospend, MessageData, MessageId, MessageType},
+    message::{CoSpendProposal, MessageData, MessageId, MessageType},
     Simulation, TimeStep,
 };
 use bdk_coin_select::{
@@ -24,7 +23,8 @@ define_entity_mut_updatable!(
         pub(crate) last_wallet_info_id: WalletInfoId, // Monotone
         // Monotone index of the last message that was processed by this wallet
         pub(crate) last_processed_message: MessageId,
-        pub(crate) participating_cospends: OrdSet<CospendId>,
+        /// Internal index of the cospends that this wallet is participating in
+        pub(crate) participating_cospends: OrdSet<MessageId>,
     },
     {
         pub(crate) broadcast_set_id: BroadcastSetId,
@@ -36,10 +36,10 @@ define_entity_mut_updatable!(
         pub(crate) unconfirmed_transactions: OrdSet<TxId>,
         pub(crate) unconfirmed_txos: OrdSet<Outpoint>,  // compute CPFP cost
         pub(crate) unconfirmed_spends: OrdSet<Outpoint>, // RBFable
-        pub(crate) payment_obligation_to_cospend: HashMap<PaymentObligationId, CospendId>,
+        pub(crate) payment_obligation_to_cospend: HashMap<PaymentObligationId, MessageId>,
         /// Map of unconfirmed txos to the cospends that they are in
         // TODO: need something similar for outputs as to prevent double spending to the same payment obligation
-        pub(crate) unconfirmed_txos_in_cospends: HashMap<Outpoint, CospendId>,
+        pub(crate) unconfirmed_txos_in_cospends: HashMap<Outpoint, MessageId>,
         /// Map of txids to the payment obligations that they are associated with
         /// Sim state should refrence this when updating wallet states after confirmation
         pub(crate) txid_to_handle_payment_obligation: HashMap<TxId, PaymentObligationId>,
@@ -169,7 +169,7 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     /// Returns the cospend ids that need to be processed
-    fn read_messages(&mut self) -> Vec<CospendId> {
+    fn read_messages(&mut self) -> Vec<(MessageId, CoSpendProposal)> {
         let my_id = self.id;
         let last_processed_message = self.data().last_processed_message;
         let messages_to_process = self.sim.messages[last_processed_message.0..].to_vec();
@@ -193,8 +193,8 @@ impl<'a> WalletHandleMut<'a> {
                 continue;
             }
             match &message.message {
-                MessageType::RegisterCospend(initiate_cospend) => {
-                    cospend_ids_to_process.push(initiate_cospend.cospend_id);
+                MessageType::RegisterCospend(cospend) => {
+                    cospend_ids_to_process.push((message.id, cospend.clone()));
                 }
             }
         }
@@ -274,13 +274,15 @@ impl<'a> WalletHandleMut<'a> {
             .cloned()
     }
 
-    fn participate_in_cospend(&mut self, cospend: &CospendId) -> Option<TxId> {
+    fn participate_in_cospend(
+        &mut self,
+        message_id: MessageId,
+        cospend: &CoSpendProposal,
+    ) -> Option<TxId> {
         // If im already participating in this cospend, no need to respond to registration message
-        if self.data().participating_cospends.contains(&cospend) {
+        if self.data().participating_cospends.contains(&message_id) {
             return None;
         }
-        // TODO Check the cospend validity
-        let cospend = cospend.with(self.sim).data().clone();
         if cospend.valid_till < self.sim.current_timestep {
             return None;
         }
@@ -291,11 +293,13 @@ impl<'a> WalletHandleMut<'a> {
             let to_address = payment_obligation.to.with_mut(self.sim).new_address();
             let mut tx_template =
                 self.construct_transaction_template(&payment_obligation, &change_addr, &to_address);
+            // "Lock" The inputs to this cospend. These inputs can be spent if the cospend is expired and our payment is due soon
             for input in tx_template.inputs.iter() {
                 self.info_mut()
                     .unconfirmed_txos_in_cospends
-                    .insert(input.outpoint, cospend.id);
+                    .insert(input.outpoint, message_id);
             }
+
             self.ack_transaction(&mut tx_template);
             tx_template.inputs.extend(cospend.tx.inputs.iter().cloned());
             tx_template
@@ -308,10 +312,12 @@ impl<'a> WalletHandleMut<'a> {
             debug_assert!(tx_template.wallet_acks.contains(&self.id));
 
             let tx_id = self.spend_tx(tx_template);
-            self.data_mut().participating_cospends.insert(cospend.id);
+            // Mark that we are participating in this cospend, as to prevent double participating
+            // TODO: this is unnececary as we would never process the same message twice. We may just want to "lock" the inputs only
+            self.data_mut().participating_cospends.insert(message_id);
             self.info_mut()
                 .payment_obligation_to_cospend
-                .insert(payment_obligation_id, cospend.id);
+                .insert(payment_obligation_id, message_id);
             self.info_mut()
                 .txid_to_handle_payment_obligation
                 .insert(tx_id, payment_obligation_id);
@@ -322,39 +328,40 @@ impl<'a> WalletHandleMut<'a> {
         None
     }
 
-    fn create_cospend(&mut self, payment_obligation: &PaymentObligationData) -> CospendData {
-        let cospend_id = CospendId(self.sim.cospends.len());
+    fn create_cospend(
+        &mut self,
+        message_id: MessageId,
+        payment_obligation: &PaymentObligationData,
+    ) -> CoSpendProposal {
         let change_addr = self.new_address();
         let to_address = payment_obligation.to.with_mut(self.sim).new_address();
         let mut tx_template =
             self.construct_transaction_template(payment_obligation, &change_addr, &to_address);
         self.ack_transaction(&mut tx_template);
         debug_assert!(tx_template.wallet_acks.contains(&self.id));
-        let cospend = CospendData {
-            id: cospend_id,
+        let cospend = CoSpendProposal {
             tx: tx_template,
             valid_till: payment_obligation.deadline,
         };
-        self.data_mut().participating_cospends.insert(cospend_id);
+        self.data_mut().participating_cospends.insert(message_id);
+        // "Lock" The inputs to this cospend. These inputs can be spent if the cospend is expired and our payment is due soon
         for input in cospend.tx.inputs.iter() {
             self.info_mut()
                 .unconfirmed_txos_in_cospends
-                .insert(input.outpoint, cospend_id);
+                .insert(input.outpoint, message_id);
         }
         self.info_mut()
             .payment_obligation_to_cospend
-            .insert(payment_obligation.id, cospend_id);
+            .insert(payment_obligation.id, message_id);
 
-        self.data_mut().participating_cospends.insert(cospend.id);
-        self.sim.cospends.push(cospend.clone());
         cospend
     }
 
     pub(crate) fn wake_up(&'a mut self) {
-        let cospend_ids_to_process = self.read_messages();
+        let cospend_to_process = self.read_messages();
         let mut txs_to_broadcast = Vec::new();
-        for cospend_id in cospend_ids_to_process {
-            if let Some(tx_id) = self.participate_in_cospend(&cospend_id) {
+        for (message_id, cospend) in cospend_to_process {
+            if let Some(tx_id) = self.participate_in_cospend(message_id, &cospend) {
                 txs_to_broadcast.push(tx_id);
             }
         }
@@ -374,15 +381,13 @@ impl<'a> WalletHandleMut<'a> {
             }
 
             // If its not due soon lets batch the payment
-            let cospend = self.create_cospend(&payment_obligation);
             let message_id = MessageId(self.sim.messages.len());
+            let cospend = self.create_cospend(message_id, &payment_obligation);
             let message = MessageData {
                 id: message_id,
                 from: self.id,
                 to: Some(payment_obligation.to),
-                message: MessageType::RegisterCospend(InitiateCospend {
-                    cospend_id: cospend.id,
-                }),
+                message: MessageType::RegisterCospend(cospend),
             };
             self.sim.broadcast_message(message.clone());
 

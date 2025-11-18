@@ -1,14 +1,15 @@
-use crate::{cospend::CospendId, wallet::WalletId};
+use crate::{transaction::TxData, wallet::WalletId, TimeStep};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct InitiateCospend {
-    pub(crate) cospend_id: CospendId,
+pub(crate) struct CoSpendProposal {
+    pub(crate) tx: TxData,
+    pub(crate) valid_till: TimeStep,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum MessageType {
     /// Initiate a cospend with the receiver of payment
-    RegisterCospend(InitiateCospend),
+    RegisterCospend(CoSpendProposal),
 }
 
 define_entity!(
