@@ -20,19 +20,6 @@ define_entity!(
     }
 );
 
-impl From<TxData> for lattice_psbt::UnOrderedTransaction {
-    fn from(tx: TxData) -> Self {
-        let mut psbt = lattice_psbt::UnOrderedTransaction::default();
-        for input in tx.inputs.iter() {
-            psbt.add_input(lattice_psbt::Vin::from(*input));
-        }
-        for output in tx.outputs.iter() {
-            psbt.add_output(lattice_psbt::Vout::from(*output));
-        }
-        psbt
-    }
-}
-
 impl From<TxId> for bitcoin::Txid {
     fn from(txid: TxId) -> Self {
         let mut buf = [0u8; 32];
@@ -69,12 +56,6 @@ impl From<Outpoint> for bitcoin::OutPoint {
 pub(crate) struct Input {
     pub(crate) outpoint: Outpoint, // sequence,
                                    // witness?
-}
-
-impl From<Input> for lattice_psbt::Vin {
-    fn from(input: Input) -> Self {
-        lattice_psbt::Vin::default().with_outpoint(input.outpoint.into())
-    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy, Eq, PartialOrd, Ord)]
@@ -139,12 +120,6 @@ impl From<Output> for bitcoin::transaction::TxOut {
             value: o.amount,
             script_pubkey,
         }
-    }
-}
-
-impl From<Output> for lattice_psbt::Vout {
-    fn from(output: Output) -> Self {
-        lattice_psbt::Vout::from_output(&bitcoin::transaction::TxOut::from(output))
     }
 }
 
