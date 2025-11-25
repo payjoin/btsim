@@ -161,7 +161,7 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
         }));
     }
 
-    // TODO: check if we processed any messages
+    // TODO: check if we processed any messages and create events for payjoins that were participated in
 
     events
 }
@@ -169,7 +169,7 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
 /// Strategies will pick one action to minimize their cost
 /// TODO: Strategies should be composible. They should enform the action decision space scoring and doing actions should be handling by something else that has composed multiple strategies.
 pub(crate) trait Strategy {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> impl Iterator<Item = Action>;
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action>;
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
@@ -201,9 +201,9 @@ pub(crate) struct UnilateralSpender;
 
 impl Strategy for UnilateralSpender {
     /// The decision space of the unilateral spender is the set of all payment obligations and payjoin proposals
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> impl Iterator<Item = Action> {
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
         if state.payment_obligations.is_empty() {
-            return vec![Action::Wait].into_iter();
+            return vec![Action::Wait];
         }
         let mut actions = vec![];
         for po in state.payment_obligations.iter() {
@@ -211,16 +211,16 @@ impl Strategy for UnilateralSpender {
             actions.push(Action::UnilateralSpend(po.id));
         }
 
-        actions.into_iter()
+        actions
     }
 }
 
 pub(crate) struct PayjoinStrategy;
 
 impl Strategy for PayjoinStrategy {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> impl Iterator<Item = Action> {
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
         if state.payment_obligations.is_empty() {
-            return vec![Action::Wait].into_iter();
+            return vec![Action::Wait];
         }
         let mut actions = vec![];
         for po in state.payment_obligations.iter() {
@@ -238,10 +238,23 @@ impl Strategy for PayjoinStrategy {
             }
         }
 
-        actions.into_iter()
+        actions
     }
 }
 
+pub(crate) struct CompositeStrategy {
+    pub(crate) strategies: Vec<Box<dyn Strategy>>,
+}
+
+impl Strategy for CompositeStrategy {
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+        let mut actions = vec![];
+        for strategy in self.strategies.iter() {
+            actions.extend(strategy.enumerate_candidate_actions(state));
+        }
+        actions
+    }
+}
 // TODO: this should be a trait once we have different scoring strategies
 pub(crate) struct CompositeScorer {
     pub(crate) payjoin_utility_factor: f64,

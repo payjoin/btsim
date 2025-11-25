@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
 use crate::{
-    actions::{Action, CompositeScorer, Strategy, UnilateralSpender, WalletView},
+    actions::{
+        Action, CompositeScorer, CompositeStrategy, PayjoinStrategy, Strategy, UnilateralSpender,
+        WalletView,
+    },
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
-    message::{MessageId, MessageType, PayjoinProposal},
+    message::{MessageData, MessageId, MessageType, PayjoinProposal},
     Simulation, TimeStep,
 };
 use bdk_coin_select::{
@@ -344,13 +347,15 @@ impl<'a> WalletHandleMut<'a> {
 
     fn create_payjoin(
         &mut self,
-        message_id: MessageId,
-        payment_obligation: &PaymentObligationData,
-    ) -> PayjoinProposal {
+        // Message id is serving as a proxy for payjoin id
+        payment_obligation: &PaymentObligationId,
+    ) -> MessageData {
+        let payment_obligation = payment_obligation.with(self.sim).data().clone();
+        let message_id = MessageId(self.sim.messages.len());
         let change_addr = self.new_address();
         let to_address = payment_obligation.to.with_mut(self.sim).new_address();
         let mut tx_template =
-            self.construct_transaction_template(payment_obligation, &change_addr, &to_address);
+            self.construct_transaction_template(&payment_obligation, &change_addr, &to_address);
         self.ack_transaction(&mut tx_template);
         debug_assert!(tx_template.wallet_acks.contains(&self.id));
         let payjoin_proposal = PayjoinProposal {
@@ -367,7 +372,12 @@ impl<'a> WalletHandleMut<'a> {
             .payment_obligation_to_payjoin
             .insert(payment_obligation.id, message_id);
 
-        payjoin_proposal
+        MessageData {
+            id: message_id,
+            from: self.id,
+            to: Some(payment_obligation.to),
+            message: MessageType::InitiatePayjoin(payjoin_proposal),
+        }
     }
 
     pub(crate) fn wallet_view(&self) -> WalletView {
@@ -399,10 +409,14 @@ impl<'a> WalletHandleMut<'a> {
 
     pub(crate) fn do_action(&'a mut self, action: &Action) {
         match action {
+            Action::Wait => {}
             Action::UnilateralSpend(po) => {
                 let _ = self.handle_payment_obligation(po);
             }
-            Action::Wait => {}
+            Action::InitiatePayjoin(po) => {
+                let message = self.create_payjoin(po);
+                self.sim.broadcast_message(message);
+            }
             _ => unimplemented!(),
         }
     }
@@ -412,10 +426,13 @@ impl<'a> WalletHandleMut<'a> {
             payjoin_utility_factor: 0.01,
             payment_obligation_utility_factor: 0.01,
         };
-        let strategy = UnilateralSpender;
+        let strategy = CompositeStrategy {
+            strategies: vec![Box::new(UnilateralSpender), Box::new(PayjoinStrategy)],
+        };
         let wallet_view = self.wallet_view();
         let action = strategy
             .enumerate_candidate_actions(&wallet_view)
+            .into_iter()
             .min_by_key(|action| scorer.score_action(action, self))
             .unwrap_or(Action::Wait);
         self.do_action(&action);
