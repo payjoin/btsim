@@ -16,6 +16,8 @@ struct Args {
 }
 
 fn main() {
+    env_logger::init();
+
     let args = Args::parse();
     let mut sim = btsim::SimulationBuilder::new(
         args.seed.unwrap_or(42),

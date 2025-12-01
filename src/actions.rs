@@ -1,6 +1,7 @@
 use std::{iter::Sum, ops::Add};
 
 use bitcoin::Amount;
+use log::debug;
 
 use crate::{
     message::{MessageData, MessageId, MessageType, PayjoinProposal},
@@ -52,7 +53,7 @@ impl PaymentObligationHandledEvent {
         };
         let score = self.balance_difference
             + (payment_obligation_utility_factor * self.amount_handled * deadlline_anxiety);
-        println!(">>>>> PaymentObligationHandledEvent Score: {:?}", score);
+        debug!("PaymentObligationHandledEvent score: {:?}", score);
         ActionScore(score)
     }
 }
@@ -84,7 +85,7 @@ impl InitiatePayjoinEvent {
         };
         let score =
             self.balance_difference + (payjoin_utility_factor * self.amount_handled * anxiety);
-        println!(">>>>> InitiatePayjoinEvent Score: {:?}", score);
+        debug!("InitiatePayjoinEvent score: {:?}", score);
         ActionScore(score)
     }
 }
@@ -108,7 +109,7 @@ impl RespondToPayjoinEvent {
         // However the utility should be higher for fee saving an a privacy preservation.
         // TODO These last two are not factored in yet.
         let score = self.balance_difference + (payjoin_utility_factor * self.amount_handled);
-        println!(">>>>> RespondToPayjoinEvent Score: {:?}", score);
+        debug!("RespondToPayjoinEvent score: {:?}", score);
 
         ActionScore(score)
     }

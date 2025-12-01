@@ -3,6 +3,7 @@ use std::path::Path;
 use bitcoin::{Amount, Weight};
 use graphviz_rust::{cmd::Format, dot_structures, printer::PrinterContext};
 use im::{OrdMap, OrdSet, Vector};
+use log::info;
 use petgraph::graph::{NodeIndex, UnGraph};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
@@ -348,7 +349,7 @@ impl<'a> Simulation {
     pub fn run(&mut self) -> SimulationResult {
         let max_timesteps = self.config.max_timestep;
         while self.current_timestep < max_timesteps {
-            println!("Timestep {}", self.current_timestep.0);
+            info!("Timestep {}", self.current_timestep.0);
             self.tick();
             // TODO: call this only in debug / testmode?
             self.assert_invariants();
@@ -363,7 +364,7 @@ impl<'a> Simulation {
         }
 
         if self.current_timestep.0 % self.config.block_interval == 0 {
-            println!("Mining block");
+            info!("Mining block");
             let bx_id = BroadcastSetId(self.broadcast_set_data.len() - 1);
             let bx_set_handle = bx_id.with_mut(self);
             bx_set_handle

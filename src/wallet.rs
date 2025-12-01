@@ -13,6 +13,7 @@ use bdk_coin_select::{
 };
 use bitcoin::{transaction::InputWeightPrediction, Amount};
 use im::{HashMap, OrdSet, Vector};
+use log::{info, warn};
 
 use crate::transaction::*;
 
@@ -116,7 +117,8 @@ impl<'a> WalletHandle<'a> {
 
         match coin_selector.run_bnb(metric, 100_000) {
             Err(err) => {
-                println!("BNB failed to find a solution: {}", err);
+                // TODO: should be a error log
+                warn!("BNB failed to find a solution: {}", err);
 
                 coin_selector
                     .select_until_target_met(target)
@@ -361,7 +363,7 @@ impl<'a> WalletHandleMut<'a> {
             .into_iter()
             .max_by_key(|action| scorer.score_action(action, self))
             .unwrap_or(Action::Wait);
-        println!(">>>>> Wallet id: {:?} chose action: {:?}", self.id, action);
+        info!("Wallet id: {:?} chose action: {:?}", self.id, action);
         self.do_action(&action);
     }
 
