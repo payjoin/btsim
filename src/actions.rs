@@ -24,14 +24,14 @@ pub(crate) enum Action {
 
 /// Hypothetical outcomes of an action
 #[derive(Debug)]
-pub(crate) enum Event {
-    PaymentObligationHandled(PaymentObligationHandledEvent),
-    InitiatePayjoin(InitiatePayjoinEvent),
-    RespondToPayjoin(RespondToPayjoinEvent),
+pub(crate) enum PredictedOutcome {
+    PaymentObligationHandled(PaymentObligationHandledOutcome),
+    InitiatePayjoin(InitiatePayjoinOutcome),
+    RespondToPayjoin(RespondToPayjoinOutcome),
 }
 
 #[derive(Debug)]
-pub(crate) struct PaymentObligationHandledEvent {
+pub(crate) struct PaymentObligationHandledOutcome {
     /// Payment obligation amount
     amount_handled: f64,
     /// Balance difference after the action
@@ -40,7 +40,7 @@ pub(crate) struct PaymentObligationHandledEvent {
     time_left: i32,
 }
 
-impl PaymentObligationHandledEvent {
+impl PaymentObligationHandledOutcome {
     fn score(&self, payment_obligation_utility_factor: f64) -> ActionScore {
         let utility = {
             if self.time_left > 5 {
@@ -61,7 +61,7 @@ impl PaymentObligationHandledEvent {
 }
 
 #[derive(Debug)]
-pub(crate) struct InitiatePayjoinEvent {
+pub(crate) struct InitiatePayjoinOutcome {
     /// Time left on the payment obligation
     time_left: i32,
     /// Amount of the payment obligation
@@ -73,7 +73,7 @@ pub(crate) struct InitiatePayjoinEvent {
     // TODO: somekind of privacy gained metric?
 }
 
-impl InitiatePayjoinEvent {
+impl InitiatePayjoinOutcome {
     /// Batching anxiety should increase and payjoin utility should decrease the closer the deadline is.
     /// This can be modeled as a inverse cubic function of the time left.
     /// TODO: how do we model potential fee savings? Understanding that at most there will be one input and one output added could lead to a simple linear model.
@@ -96,7 +96,7 @@ impl InitiatePayjoinEvent {
 }
 
 #[derive(Debug)]
-pub(crate) struct RespondToPayjoinEvent {
+pub(crate) struct RespondToPayjoinOutcome {
     /// Amount of the payment obligation
     amount_handled: f64,
     /// Balance difference after the action
@@ -105,7 +105,7 @@ pub(crate) struct RespondToPayjoinEvent {
     fee_savings: Amount,
 }
 
-impl RespondToPayjoinEvent {
+impl RespondToPayjoinOutcome {
     fn score(&self, payjoin_utility_factor: f64) -> ActionScore {
         // Responding to a payjoin should always be better than unilaterally spending at this point
         // As there is no interaction cost. TODO in the future we will want to model the cost of doing the last round of interaction with the counterparty
@@ -143,7 +143,7 @@ impl WalletView {
     }
 }
 
-fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<Event> {
+fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<PredictedOutcome> {
     let wallet_view = wallet_handle.wallet_view();
     let mut events = vec![];
     let old_info = wallet_handle.info().clone();
@@ -163,8 +163,8 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
             .amount
             .to_float_in(bitcoin::Denomination::Satoshi)
             * -1.0;
-        events.push(Event::PaymentObligationHandled(
-            PaymentObligationHandledEvent {
+        events.push(PredictedOutcome::PaymentObligationHandled(
+            PaymentObligationHandledOutcome {
                 amount_handled: payment_obligation
                     .amount
                     .to_float_in(bitcoin::Denomination::Satoshi),
@@ -185,7 +185,7 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
         let po = payment_obligation_id.with(&sim).data();
         let amount_handled = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
         let balance_difference = amount_handled * -1.0; // TODO: fee's are not factored in yet
-        events.push(Event::InitiatePayjoin(InitiatePayjoinEvent {
+        events.push(PredictedOutcome::InitiatePayjoin(InitiatePayjoinOutcome {
             time_left: po.deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
             amount_handled,
             balance_difference,
@@ -203,11 +203,13 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
         let po = payment_obligation_id.with(&sim).data();
         let amount_handled = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
         let balance_difference = amount_handled * -1.0; // TODO: fee's are not factored in yet
-        events.push(Event::RespondToPayjoin(RespondToPayjoinEvent {
-            amount_handled,
-            balance_difference,
-            fee_savings: Amount::ZERO, // TODO: implement this
-        }));
+        events.push(PredictedOutcome::RespondToPayjoin(
+            RespondToPayjoinOutcome {
+                amount_handled,
+                balance_difference,
+                fee_savings: Amount::ZERO, // TODO: implement this
+            },
+        ));
     }
 
     events
@@ -327,13 +329,13 @@ impl CompositeScorer {
         let mut score = ActionScore(0.0);
         for event in events {
             match event {
-                Event::PaymentObligationHandled(event) => {
+                PredictedOutcome::PaymentObligationHandled(event) => {
                     score = score + event.score(self.payment_obligation_utility_factor);
                 }
-                Event::InitiatePayjoin(event) => {
+                PredictedOutcome::InitiatePayjoin(event) => {
                     score = score + event.score(self.payjoin_utility_factor);
                 }
-                Event::RespondToPayjoin(event) => {
+                PredictedOutcome::RespondToPayjoin(event) => {
                     score = score + event.score(self.payjoin_utility_factor);
                 }
             }
