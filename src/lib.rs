@@ -20,7 +20,7 @@ use crate::{
     actions::{create_strategy, CompositeScorer, CompositeStrategy},
     blocks::{
         BlockData, BlockHandle, BlockId, BlockInfo, BroadcastSetData, BroadcastSetHandleMut,
-        BroadcastSetId, BroadcastSetInfo,
+        BroadcastSetId, BroadcastSetInfo, BroadcastSetType,
     },
     config::WalletTypeConfig,
     economic_graph::EconomicGraph,
@@ -260,8 +260,9 @@ impl SimulationBuilder {
         });
 
         // empty initial broadcast set
-        sim.broadcast_set_data
-            .push(BroadcastSetData::Block(sim.genesis_block()));
+        sim.broadcast_set_data.push(BroadcastSetData {
+            data: BroadcastSetType::Block(sim.genesis_block()),
+        });
         sim.broadcast_set_info.push(BroadcastSetInfo {
             parent_id: None,
             chain_tip_id: sim.genesis_block(),

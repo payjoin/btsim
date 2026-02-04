@@ -52,31 +52,35 @@ define_entity!(
     }
 );
 
-// TODO refactor?
-define_entity_id_and_handle!(BroadcastSet);
+define_entity!(
+    BroadcastSet,
+    {
+        pub(crate) data: BroadcastSetType,
+    },
+    {
+        pub(crate) parent_id: Option<BroadcastSetId>,
+        pub(crate) chain_tip_id: BlockId,
+        pub(crate) unconfirmed_txs: OrdSet<TxId>,
+        pub(crate) invalidated_txs: OrdSet<TxId>,
+    }
+);
+
 define_entity_handle_mut!(BroadcastSet);
-define_entity_info!(BroadcastSet, {
-    pub(crate) parent_id: Option<BroadcastSetId>,
-    pub(crate) chain_tip_id: BlockId,
-    // new_txs: Vec<TxId>,
-    pub(crate) unconfirmed_txs: OrdSet<TxId>,
-    pub(crate) invalidated_txs: OrdSet<TxId>,
-});
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 /// Represents a broadcast set in the simulation, which can be a confirmed block
 /// or a set of transactions awaiting confirmation.
-pub(crate) enum BroadcastSetData {
+pub(crate) enum BroadcastSetType {
     Block(BlockId),
     Transactions(Vec<TxId>),
 }
 
 impl<'a> BroadcastSetHandle<'a> {
-    fn data(&'a self) -> &'a BroadcastSetData {
-        &self.sim.broadcast_set_data[self.id.0]
+    pub(crate) fn data(&'a self) -> &'a BroadcastSetType {
+        &self.sim.broadcast_set_data[self.id.0].data
     }
 
-    fn info(&'a self) -> &'a BroadcastSetInfo {
+    pub(crate) fn info(&'a self) -> &'a BroadcastSetInfo {
         &self.sim.broadcast_set_info[self.id.0]
     }
 }
@@ -108,9 +112,9 @@ impl<'a> BroadcastSetHandleMut<'a> {
             }
         }
 
-        self.sim
-            .broadcast_set_data
-            .push(BroadcastSetData::Block(block_id));
+        self.sim.broadcast_set_data.push(BroadcastSetData {
+            data: BroadcastSetType::Block(block_id),
+        });
 
         self.sim.broadcast_set_info.push(BroadcastSetInfo {
             parent_id: Some(self.id),
@@ -146,7 +150,7 @@ impl<'a> BroadcastSetHandleMut<'a> {
         };
 
         match self.data() {
-            BroadcastSetData::Transactions(new_txs) => {
+            BroadcastSetType::Transactions(new_txs) => {
                 for tx in new_txs {
                     for input in tx.with(self.sim).inputs() {
                         let prevout = input.prevout();
@@ -173,7 +177,7 @@ impl<'a> BroadcastSetHandleMut<'a> {
                     }
                 }
             }
-            BroadcastSetData::Block(_) => {
+            BroadcastSetType::Block(_) => {
                 for tx in &self.chain_tip().info().confirmed_txs {
                     let tx_handle = tx.with(self.sim);
                     for input in tx_handle.inputs() {
@@ -284,7 +288,9 @@ impl<'a> BroadcastSetHandleMut<'a> {
             .clone()
             .union(OrdSet::from(&new_txs));
 
-        let data = BroadcastSetData::Transactions(new_txs);
+        let data = BroadcastSetData {
+            data: BroadcastSetType::Transactions(new_txs),
+        };
 
         let bxset = BroadcastSetInfo {
             parent_id: Some(self.id),
