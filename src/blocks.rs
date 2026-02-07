@@ -17,8 +17,13 @@ pub(crate) struct ChainParams {
 
 impl ChainParams {
     fn subsidy(self, height: usize) -> Amount {
-        Amount::from_sat(self.initial_subsidy.to_sat() >> (height / self.halving_interval))
-        // TODO BIP 42
+        let halvings = height / self.halving_interval;
+        if halvings >= 64 {
+            // BIP 42: After 64 halvings (or when shift would be >= 64), subsidy is permanently zero
+            Amount::ZERO
+        } else {
+            Amount::from_sat(self.initial_subsidy.to_sat() >> halvings)
+        }
     }
 }
 
