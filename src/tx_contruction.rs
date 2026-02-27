@@ -238,10 +238,10 @@ mod tests {
                 count: num_wallets,
                 strategies: vec!["UnilateralSpender".to_string()],
                 scorer: ScorerConfig {
-                    initiate_payjoin_utility_factor: 0.0,
-                    respond_to_payjoin_utility_factor: 0.0,
-                    payment_obligation_utility_factor: 0.0,
-                    multi_party_payjoin_utility_factor: 0.0,
+                    fee_savings_weight: 0.0,
+                    privacy_weight: 0.0,
+                    payment_obligation_weight: 0.0,
+                    coordination_weight: 0.0,
                 },
             }];
             SimulationBuilder::new(42, wallet_types, 10, 1, 0).build()
@@ -255,10 +255,10 @@ mod tests {
         ) -> TxData {
             // Create a wallet and address for outputs
             let default_scorer = CompositeScorer {
-                initiate_payjoin_utility_factor: 0.0,
-                payment_obligation_utility_factor: 0.0,
-                respond_to_payjoin_utility_factor: 0.0,
-                multi_party_payjoin_utility_factor: 0.0,
+                fee_savings_weight: 0.0,
+                privacy_weight: 0.0,
+                payment_obligation_weight: 0.0,
+                coordination_weight: 0.0,
             };
             let wallet = sim.new_wallet(
                 CompositeStrategy {
@@ -319,10 +319,10 @@ mod tests {
             num_outputs: usize,
         ) {
             let default_scorer = CompositeScorer {
-                initiate_payjoin_utility_factor: 0.0,
-                payment_obligation_utility_factor: 0.0,
-                respond_to_payjoin_utility_factor: 0.0,
-                multi_party_payjoin_utility_factor: 0.0,
+                fee_savings_weight: 0.0,
+                privacy_weight: 0.0,
+                payment_obligation_weight: 0.0,
+                coordination_weight: 0.0,
             };
             let wallet = sim.new_wallet(
                 CompositeStrategy {

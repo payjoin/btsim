@@ -273,16 +273,10 @@ impl SimulationBuilder {
         // Create wallets according to their type configurations
         for wallet_type in &self.wallet_types {
             let scorer = CompositeScorer {
-                initiate_payjoin_utility_factor: wallet_type.scorer.initiate_payjoin_utility_factor,
-                payment_obligation_utility_factor: wallet_type
-                    .scorer
-                    .payment_obligation_utility_factor,
-                respond_to_payjoin_utility_factor: wallet_type
-                    .scorer
-                    .respond_to_payjoin_utility_factor,
-                multi_party_payjoin_utility_factor: wallet_type
-                    .scorer
-                    .multi_party_payjoin_utility_factor,
+                fee_savings_weight: wallet_type.scorer.fee_savings_weight,
+                privacy_weight: wallet_type.scorer.privacy_weight,
+                payment_obligation_weight: wallet_type.scorer.payment_obligation_weight,
+                coordination_weight: wallet_type.scorer.coordination_weight,
             };
 
             for _ in 0..wallet_type.count {
@@ -770,10 +764,10 @@ mod tests {
             count: 5,
             strategies: vec!["UnilateralSpender".to_string()],
             scorer: ScorerConfig {
-                initiate_payjoin_utility_factor: 0.0,
-                respond_to_payjoin_utility_factor: 0.0,
-                payment_obligation_utility_factor: 1.0,
-                multi_party_payjoin_utility_factor: 0.0,
+                fee_savings_weight: 1.0,
+                privacy_weight: 2.0,
+                payment_obligation_weight: 1.0,
+                coordination_weight: 0.0,
             },
         }];
         let mut sim = SimulationBuilder::new(42, wallet_types, 20, 1, 10).build();
@@ -811,10 +805,10 @@ mod tests {
                 "PayjoinStrategy".to_string(),
             ],
             scorer: ScorerConfig {
-                initiate_payjoin_utility_factor: 2.0,
-                respond_to_payjoin_utility_factor: 5.0,
-                payment_obligation_utility_factor: 1.0,
-                multi_party_payjoin_utility_factor: 0.0,
+                fee_savings_weight: 1.0,
+                privacy_weight: 2.0,
+                payment_obligation_weight: 1.0,
+                coordination_weight: 0.0,
             },
         }];
         let mut sim = SimulationBuilder::new(42, wallet_types, 20, 1, 10).build();
@@ -822,10 +816,10 @@ mod tests {
 
         use crate::actions::{create_strategy, CompositeScorer};
         let default_scorer = CompositeScorer {
-            initiate_payjoin_utility_factor: 2.0,
-            payment_obligation_utility_factor: 1.0,
-            respond_to_payjoin_utility_factor: 5.0,
-            multi_party_payjoin_utility_factor: 0.0,
+            fee_savings_weight: 1.0,
+            privacy_weight: 2.0,
+            payment_obligation_weight: 1.0,
+            coordination_weight: 0.0,
         };
         let alice_strategies = vec![
             create_strategy("UnilateralSpender").unwrap(),
