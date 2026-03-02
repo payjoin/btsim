@@ -382,8 +382,59 @@ mod tests {
         let txdata = sent_ready
             .have_enough_ready_to_sign()
             .expect("should have enough ready to sign");
-        // TODO: assert the inputs and outputs are correct
+
+        // Verify input composition (2 from template + 2 from others)
         assert_eq!(txdata.inputs.len(), 4);
+
+        // Collect all TxIds from inputs
+        let input_txids: Vec<usize> = txdata
+            .inputs
+            .iter()
+            .map(|input| input.outpoint.txid.0)
+            .collect();
+
+        // Should have template inputs (TxId(0) and TxId(1))
+        assert!(
+            input_txids.contains(&0),
+            "Should contain template input TxId(0)"
+        );
+        assert!(
+            input_txids.contains(&1),
+            "Should contain template input TxId(1)"
+        );
+
+        // Should have other participant inputs (TxId(100) and TxId(101))
+        assert!(
+            input_txids.contains(&100),
+            "Should contain other participant input TxId(100)"
+        );
+        assert!(
+            input_txids.contains(&101),
+            "Should contain other participant input TxId(101)"
+        );
+
+        // Verify output composition (1 from template + 2 from others)
         assert_eq!(txdata.outputs.len(), 3);
+
+        // Should have 1 output with 1000 sats (from template) and 2 outputs with 2000 sats (from others)
+        let output_1000_count = txdata
+            .outputs
+            .iter()
+            .filter(|output| output.amount == Amount::from_sat(1000))
+            .count();
+        let output_2000_count = txdata
+            .outputs
+            .iter()
+            .filter(|output| output.amount == Amount::from_sat(2000))
+            .count();
+
+        assert_eq!(
+            output_1000_count, 1,
+            "Should have exactly 1 output with 1000 sats from template"
+        );
+        assert_eq!(
+            output_2000_count, 2,
+            "Should have exactly 2 outputs with 2000 sats from other participants"
+        );
     }
 }

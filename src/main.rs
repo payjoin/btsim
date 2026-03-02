@@ -28,6 +28,6 @@ fn main() {
     );
     println!(
         "Missed payment obligations percentage: {:?}",
-        result.precentage_of_payment_obligations_missed()
+        result.percentage_of_payment_obligations_missed()
     );
 }

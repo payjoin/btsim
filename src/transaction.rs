@@ -1,6 +1,7 @@
 use crate::wallet::{AddressHandle, AddressId, WalletHandle, WalletHandleMut, WalletId};
 use crate::Simulation;
 use bitcoin::consensus::Decodable;
+use bitcoin::hashes::Hash;
 use bitcoin::transaction::{predict_weight, InputWeightPrediction};
 use bitcoin::{Amount, Weight};
 use bitcoin::{FeeRate, ScriptBuf, WitnessProgram};
@@ -26,6 +27,16 @@ impl From<TxId> for bitcoin::Txid {
         let txid_bytes = txid.0.to_le_bytes();
         buf[..txid_bytes.len()].copy_from_slice(&txid_bytes);
         bitcoin::Txid::consensus_decode(&mut &buf[..]).expect("32 bytes should never fail")
+    }
+}
+
+impl From<bitcoin::Txid> for TxId {
+    fn from(bitcoin_txid: bitcoin::Txid) -> Self {
+        let bytes = bitcoin_txid.as_byte_array();
+        // Extract first 8 bytes and convert to usize (little endian)
+        let mut txid_bytes = [0u8; 8];
+        txid_bytes.copy_from_slice(&bytes[..8]);
+        TxId(u64::from_le_bytes(txid_bytes) as usize)
     }
 }
 
@@ -296,11 +307,19 @@ impl TxInfo {
 
 #[cfg(test)]
 mod tests {
+    use bitcoin::hashes::Hash;
+
     use super::*;
 
     #[test]
     fn test_txid_encoding() {
         let txid = TxId(1);
-        let txid_from_bytes = bitcoin::Txid::from(txid);
+        let bitcoin_txid = bitcoin::Txid::from(txid);
+
+        assert_eq!(bitcoin_txid.as_byte_array()[0], 1);
+        assert_eq!(bitcoin_txid.to_byte_array()[1..], [0u8; 31]);
+
+        let converted_back = TxId::from(bitcoin_txid);
+        assert_eq!(converted_back, txid);
     }
 }
