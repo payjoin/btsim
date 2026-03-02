@@ -33,3 +33,4 @@ rand_distr = "0.5.1"
 rand_pcg = "0.9.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+tx-indexer-primitives = { path = "../tx-indexer/src/crates/primitives" }

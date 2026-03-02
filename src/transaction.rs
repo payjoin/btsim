@@ -4,6 +4,13 @@ use bitcoin::consensus::Decodable;
 use bitcoin::transaction::{predict_weight, InputWeightPrediction};
 use bitcoin::{Amount, Weight};
 use bitcoin::{FeeRate, ScriptBuf, WitnessProgram};
+use tx_indexer_primitives::loose::{TxId as LooseTxId, TxOutId as LooseTxOutId};
+use tx_indexer_primitives::traits::abstract_fingerprints::HasNLockTime;
+use tx_indexer_primitives::traits::abstract_types::{
+    AbstractTransaction, AbstractTxIn, AbstractTxOut, EnumerateOutputValueInArbitraryOrder,
+    EnumerateSpentTxOuts, OutputCount,
+};
+use tx_indexer_primitives::{AnyOutId, AnyTxId, ScriptPubkeyHash};
 
 define_entity!(
     Tx,
@@ -27,6 +34,10 @@ impl From<TxId> for bitcoin::Txid {
         buf[..txid_bytes.len()].copy_from_slice(&txid_bytes);
         bitcoin::Txid::consensus_decode(&mut &buf[..]).expect("32 bytes should never fail")
     }
+}
+
+fn to_loose_txid(txid: TxId) -> LooseTxId {
+    LooseTxId::new(u32::try_from(txid.0).expect("txid should fit in u32"))
 }
 
 // TODO rename to OutputId?
@@ -56,6 +67,23 @@ impl From<Outpoint> for bitcoin::OutPoint {
 pub(crate) struct Input {
     pub(crate) outpoint: Outpoint, // sequence,
                                    // witness?
+}
+
+impl AbstractTxIn for Input {
+    fn prev_txid(&self) -> Option<AnyTxId> {
+        Some(AnyTxId::from(to_loose_txid(self.outpoint.txid)))
+    }
+
+    fn prev_vout(&self) -> Option<u32> {
+        Some(u32::try_from(self.outpoint.index).expect("vout index should fit in u32"))
+    }
+
+    fn prev_txout_id(&self) -> Option<AnyOutId> {
+        Some(AnyOutId::from(LooseTxOutId::new(
+            to_loose_txid(self.outpoint.txid),
+            u32::try_from(self.outpoint.index).expect("vout index should fit in u32"),
+        )))
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy, Eq, PartialOrd, Ord)]
@@ -98,6 +126,16 @@ impl<'a> From<InputHandle<'a>> for Output {
 pub(crate) struct Output {
     pub(crate) amount: Amount,
     pub(crate) address_id: AddressId,
+}
+
+impl AbstractTxOut for Output {
+    fn value(&self) -> Amount {
+        self.amount
+    }
+
+    fn script_pubkey_hash(&self) -> ScriptPubkeyHash {
+        unimplemented!("fungi outputs do not track script pubkey hashes")
+    }
 }
 
 impl From<Output> for bitcoin::transaction::TxOut {
@@ -259,6 +297,67 @@ impl Default for TxData {
             outputs: Vec::default(),
             wallet_acks: Vec::default(),
         }
+    }
+}
+
+impl AbstractTransaction for TxData {
+    fn inputs(&self) -> Box<dyn Iterator<Item = Box<dyn AbstractTxIn + '_>> + '_> {
+        let inputs: Vec<Box<dyn AbstractTxIn>> = self
+            .inputs
+            .iter()
+            .copied()
+            .map(|input| Box::new(input) as Box<dyn AbstractTxIn>)
+            .collect();
+        Box::new(inputs.into_iter())
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = Box<dyn AbstractTxOut + '_>> + '_> {
+        let outputs: Vec<Box<dyn AbstractTxOut>> = self
+            .outputs
+            .iter()
+            .copied()
+            .map(|output| Box::new(output) as Box<dyn AbstractTxOut>)
+            .collect();
+        Box::new(outputs.into_iter())
+    }
+
+    fn output_len(&self) -> usize {
+        self.outputs.len()
+    }
+
+    fn output_at(&self, index: usize) -> Option<Box<dyn AbstractTxOut + '_>> {
+        self.outputs
+            .get(index)
+            .copied()
+            .map(|output| Box::new(output) as Box<dyn AbstractTxOut>)
+    }
+
+    fn locktime(&self) -> u32 {
+        unimplemented!("fungi tx data does not track locktime")
+    }
+}
+
+impl OutputCount for TxData {
+    fn output_count(&self) -> usize {
+        self.outputs.len()
+    }
+}
+
+impl EnumerateOutputValueInArbitraryOrder for TxData {
+    fn output_values(&self) -> impl Iterator<Item = Amount> {
+        self.outputs.iter().map(|output| output.amount)
+    }
+}
+
+impl EnumerateSpentTxOuts for TxData {
+    fn spent_coins(&self) -> impl Iterator<Item = AnyOutId> {
+        self.inputs.iter().filter_map(|input| input.prev_txout_id())
+    }
+}
+
+impl HasNLockTime for TxData {
+    fn n_locktime(&self) -> u32 {
+        unimplemented!("fungi tx data does not track n_locktime")
     }
 }
 
