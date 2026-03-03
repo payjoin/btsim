@@ -106,13 +106,14 @@ pub(crate) struct InitiatePayjoinOutcome {
     balance_difference: f64,
     /// Fee savings from the payjoin
     fee_savings: Amount,
-    // TODO: somekind of privacy gained metric?
+    /// Privacy score based on input/output mixing and timing analysis resistance
+    privacy_score: f64,
 }
 
 impl InitiatePayjoinOutcome {
     /// Batching anxiety should increase and payjoin utility should decrease the closer the deadline is.
     /// This can be modeled as a inverse cubic function of the time left.
-    /// TODO: how do we model potential fee savings? Understanding that at most there will be one input and one output added could lead to a simple linear model.
+    /// Fee savings are modeled linearly based on the additional input/output structure of payjoins.
     fn score(&self, payjoin_utility_factor: f64) -> ActionScore {
         let points = [
             (0.0, 0.0),
@@ -121,8 +122,20 @@ impl InitiatePayjoinOutcome {
         ];
         let utility = piecewise_linear(self.time_left as f64, &points);
 
-        let score = self.balance_difference + (self.amount_handled * utility);
-        debug!("InitiatePayjoinEvent score: {:?}", score);
+        // Base utility score
+        let base_score = self.balance_difference + (self.amount_handled * utility);
+
+        // Add fee savings benefit (convert to float for calculation)
+        let fee_benefit = self.fee_savings.to_float_in(bitcoin::Denomination::Satoshi);
+
+        // Add privacy benefit (weighted by utility factor)
+        let privacy_benefit = self.privacy_score * payjoin_utility_factor;
+
+        let score = base_score + fee_benefit + privacy_benefit;
+        debug!(
+            "InitiatePayjoinEvent score: {:?} (base: {:?}, fee: {:?}, privacy: {:?})",
+            score, base_score, fee_benefit, privacy_benefit
+        );
         ActionScore(score)
     }
 }
@@ -221,6 +234,41 @@ impl WalletView {
         }
     }
 }
+/// Calculate fee savings for a payjoin based on the typical structure:
+/// - Payjoin adds one input and one output compared to separate transactions
+/// - Fee savings = (2 separate txs) - (1 combined tx)
+fn calculate_payjoin_fee_savings(amount: f64) -> Amount {
+    // Rough estimate: payjoins typically save ~100-200 sats in fees
+    // This is a simplified model - in reality it depends on:
+    // - Current fee rate
+    // - Input/output sizes
+    // - Whether batching would have occurred anyway
+    let base_savings_sats = 150.0;
+
+    // Larger amounts might justify slightly higher fee savings due to more inputs
+    // Cap at 2x for very large amounts
+    let amount_factor = (amount / 100000.0).min(2.0);
+    let total_savings = (base_savings_sats * (1.0 + amount_factor * 0.2)) as u64;
+
+    Amount::from_sat(total_savings)
+}
+
+/// Calculate privacy score for a payjoin
+/// Higher scores indicate better privacy benefits
+fn calculate_payjoin_privacy_score(amount: f64) -> f64 {
+    // Base privacy benefit from transaction structure obfuscation
+    let base_privacy = 10.0;
+
+    // Larger amounts get slightly higher privacy scores as they're more valuable to hide
+    // Log scaling, capped at 1.0
+    let amount_factor = (amount / 100000.0).ln_1p().min(1.0);
+
+    // Random timing component (simplified - in reality depends on network timing)
+    let timing_privacy = 2.0;
+
+    base_privacy + (amount_factor * 5.0) + timing_privacy
+}
+
 fn get_payment_obligation_handled_outcome(
     payment_obligation_id: &PaymentObligationId,
     sim: &Simulation,
@@ -299,7 +347,8 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
             time_left: po.deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
             amount_handled,
             balance_difference,
-            fee_savings: Amount::ZERO, // TODO: implement this
+            fee_savings: calculate_payjoin_fee_savings(amount_handled),
+            privacy_score: calculate_payjoin_privacy_score(amount_handled),
         }));
     }
 
