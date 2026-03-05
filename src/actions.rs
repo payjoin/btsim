@@ -37,6 +37,10 @@ fn piecewise_linear(x: f64, points: &[(f64, f64)]) -> f64 {
     unreachable!("x did not fall into any segment; are points sorted?");
 }
 
+fn base_cost(amount_handled: f64, fee_paid: f64, utility: f64) -> ActionCost {
+    ActionCost(fee_paid + amount_handled - utility)
+}
+
 /// An Action a wallet can perform
 #[derive(Debug)]
 pub(crate) enum Action {
@@ -83,16 +87,17 @@ pub(crate) struct PaymentObligationHandledOutcome {
 }
 
 impl PaymentObligationHandledOutcome {
-    fn score(&self, payment_obligation_weight: f64) -> ActionScore {
+    fn cost(&self, payment_obligation_weight: f64) -> ActionCost {
         let points = [
             (0.0, 2.0 * payment_obligation_weight),
             (2.0, payment_obligation_weight),
             (5.0, 0.0),
         ];
-        let utility = piecewise_linear(self.time_left as f64, &points);
-        let score = self.balance_difference + (self.amount_handled * utility);
-        debug!("PaymentObligationHandledEvent score: {:?}", score);
-        ActionScore(score)
+        let utility = piecewise_linear(self.time_left as f64, &points) * self.amount_handled;
+        let fee_paid = 0.0; // TODO: plumb actual fee paid once fee modeling is available.
+        let cost = base_cost(self.amount_handled, fee_paid, utility);
+        debug!("PaymentObligationHandledEvent cost: {:?}", cost);
+        cost
     }
 }
 
@@ -112,22 +117,20 @@ pub(crate) struct InitiatePayjoinOutcome {
 impl InitiatePayjoinOutcome {
     /// Batching anxiety should increase and payjoin utility should decrease the closer the deadline is.
     /// This can be modeled as a inverse cubic function of the time left.
-    /// Fee savings and privacy are scored independently via per-dimension weights.
-    fn score(&self, privacy_weight: f64, fee_savings_weight: f64) -> ActionScore {
+    /// Fee savings and privacy are evaluated independently via per-dimension weights.
+    fn cost(&self, privacy_weight: f64, fee_savings_weight: f64) -> ActionCost {
         let points = [
             (0.0, 0.0),
             (2.0, privacy_weight),
             (5.0, 5.0 * privacy_weight),
         ];
-        let utility = piecewise_linear(self.time_left as f64, &points);
-
-        let base_score = self.balance_difference + (self.amount_handled * utility);
+        let utility = piecewise_linear(self.time_left as f64, &points) * self.amount_handled;
         let fee_benefit =
             self.fee_savings.to_float_in(bitcoin::Denomination::Satoshi) * fee_savings_weight;
-
-        let score = base_score + fee_benefit;
-        debug!("InitiatePayjoinEvent score: {:?}", score);
-        ActionScore(score)
+        let fee_paid = 0.0;
+        let cost = base_cost(self.amount_handled, fee_paid, utility + fee_benefit);
+        debug!("InitiatePayjoinEvent cost: {:?}", cost);
+        cost
     }
 }
 
@@ -142,16 +145,17 @@ pub(crate) struct RespondToPayjoinOutcome {
 }
 
 impl RespondToPayjoinOutcome {
-    fn score(&self, privacy_weight: f64) -> ActionScore {
+    fn cost(&self, privacy_weight: f64) -> ActionCost {
         // Responding to a payjoin should always be better than unilaterally spending at this point
         // As there is no interaction cost. TODO in the future we will want to model the cost of doing
         // the last round of interaction with the counterparty as a function of rounds remaining.
 
-        let score = self.balance_difference + (privacy_weight * self.amount_handled);
+        let utility = privacy_weight * self.amount_handled;
         // TODO: add fee_savings_weight * fee_savings once fee savings are calculated
-        debug!("RespondToPayjoinEvent score: {:?}", score);
-
-        ActionScore(score)
+        let fee_paid = 0.0;
+        let cost = base_cost(self.amount_handled, fee_paid, utility);
+        debug!("RespondToPayjoinEvent cost: {:?}", cost);
+        cost
     }
 }
 
@@ -168,11 +172,12 @@ pub(crate) struct InitiateMultiPartyPayjoinOutcome {
 }
 
 impl InitiateMultiPartyPayjoinOutcome {
-    fn score(&self, _coordination_weight: f64) -> ActionScore {
-        // For now the score for initiating a multi-party payjoin is really high so it always happens no matter what
-        let score = self.amount_handled * 100.0;
-        debug!("InitiateMultiPartyPayjoinEvent score: {:?}", score);
-        ActionScore(score)
+    fn cost(&self, coordination_weight: f64) -> ActionCost {
+        let utility = self.amount_handled * 100.0 * coordination_weight;
+        let fee_paid = 0.0;
+        let cost = base_cost(self.amount_handled, fee_paid, utility);
+        debug!("InitiateMultiPartyPayjoinEvent cost: {:?}", cost);
+        cost
     }
 }
 
@@ -185,11 +190,13 @@ pub(crate) struct ParticipateMultiPartyPayjoinOutcome {
 }
 
 impl ParticipateMultiPartyPayjoinOutcome {
-    fn score(&self, _coordination_weight: f64) -> ActionScore {
-        // TODO: score the participation as a linear function of the progression of the session
-        let score = self.amount_handled * 100.0;
-        debug!("ParticipateMultiPartyPayjoinEvent score: {:?}", score);
-        ActionScore(score)
+    fn cost(&self, coordination_weight: f64) -> ActionCost {
+        // TODO: model the participation utility as a linear function of the progression of the session
+        let utility = self.amount_handled * 100.0 * coordination_weight;
+        let fee_paid = 0.0;
+        let cost = base_cost(self.amount_handled, fee_paid, utility);
+        debug!("ParticipateMultiPartyPayjoinEvent cost: {:?}", cost);
+        cost
     }
 }
 
@@ -336,24 +343,27 @@ pub(crate) trait Strategy: std::fmt::Debug {
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
-pub(crate) struct ActionScore(f64);
+pub(crate) struct ActionCost(f64);
 
-impl Sum for ActionScore {
+// Flat base cost applied to any action, including waiting.
+const INHERENT_ACTION_COST: f64 = 0.0;
+
+impl Sum for ActionCost {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         Self(iter.map(|s| s.0).sum())
     }
 }
 
-impl Eq for ActionScore {}
+impl Eq for ActionCost {}
 
-impl Ord for ActionScore {
+impl Ord for ActionCost {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         assert!(!self.0.is_nan() && !other.0.is_nan());
         self.0.partial_cmp(&other.0).expect("Checked for NaNs")
     }
 }
 
-impl Add for ActionScore {
+impl Add for ActionCost {
     type Output = Self;
     fn add(self, other: Self) -> Self {
         Self(self.0 + other.0)
@@ -557,7 +567,7 @@ impl Clone for Box<dyn Strategy> {
 pub(crate) struct CompositeScorer {
     /// Weight applied to fee savings in sats from payjoin transactions
     pub(crate) fee_savings_weight: f64,
-    /// Weight applied to privacy score from payjoin transactions
+    /// Weight applied to privacy utility from payjoin transactions
     pub(crate) privacy_weight: f64,
     /// Weight applied to deadline urgency for payment obligations
     pub(crate) payment_obligation_weight: f64,
@@ -566,38 +576,38 @@ pub(crate) struct CompositeScorer {
 }
 
 impl CompositeScorer {
-    pub(crate) fn score_action(
+    pub(crate) fn action_cost(
         &self,
         action: &Action,
         wallet_handle: &WalletHandleMut,
-    ) -> ActionScore {
+    ) -> ActionCost {
         let events = simulate_one_action(wallet_handle, action);
         // For now each action should only result in one event or none if we are waiting
-        // TODO: wallets should evaluate waiting and score it high if they are expecting payments from payjoin compatible wallets
+        // TODO: wallets should evaluate waiting and reduce its cost if they are expecting payments from payjoin compatible wallets
         debug_assert!(events.len() <= 1);
-        let mut score = ActionScore(0.0);
+        let mut cost = ActionCost(INHERENT_ACTION_COST);
         for event in events {
             match event {
                 PredictedOutcome::PaymentObligationsHandled(outcomes) => {
                     for outcome in outcomes.iter() {
-                        score = score + outcome.score(self.payment_obligation_weight);
+                        cost = cost + outcome.cost(self.payment_obligation_weight);
                     }
                 }
                 PredictedOutcome::InitiatePayjoin(event) => {
-                    score = score + event.score(self.privacy_weight, self.fee_savings_weight);
+                    cost = cost + event.cost(self.privacy_weight, self.fee_savings_weight);
                 }
                 PredictedOutcome::RespondToPayjoin(event) => {
-                    score = score + event.score(self.privacy_weight);
+                    cost = cost + event.cost(self.privacy_weight);
                 }
                 PredictedOutcome::InitiateMultiPartyPayjoin(event) => {
-                    score = score + event.score(self.coordination_weight);
+                    cost = cost + event.cost(self.coordination_weight);
                 }
                 PredictedOutcome::ParticipateMultiPartyPayjoin(event) => {
-                    score = score + event.score(self.coordination_weight);
+                    cost = cost + event.cost(self.coordination_weight);
                 }
             }
         }
-        score
+        cost
     }
 }
 

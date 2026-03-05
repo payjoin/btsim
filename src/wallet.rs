@@ -624,7 +624,7 @@ impl<'a> WalletHandleMut<'a> {
 
         let action = all_actions
             .into_iter()
-            .max_by_key(|action| scorer.score_action(action, self))
+            .min_by_key(|action| scorer.action_cost(action, self))
             .unwrap_or(Action::Wait);
         info!("Wallet id: {:?} chose action: {:?}", self.id, action);
         self.do_action(&action);
