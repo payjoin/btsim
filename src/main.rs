@@ -30,4 +30,8 @@ fn main() {
         "Missed payment obligations percentage: {:?}",
         result.percentage_of_payment_obligations_missed()
     );
+    println!(
+        "Total block weight used (wu): {}",
+        result.total_block_weight()
+    );
 }

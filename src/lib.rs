@@ -714,39 +714,68 @@ impl std::fmt::Display for Simulation {
 // Util methods dont seem too useful here.
 pub struct SimulationResult {
     tx_graph: dot_structures::Graph,
-    missed_payment_obligations: Vec<(WalletId, usize)>,
-    total_payment_obligations: usize,
+    sim: Simulation,
 }
 
 impl SimulationResult {
     pub fn new(sim: &Simulation) -> Self {
-        let mut missed_payment_obligations = Vec::new();
-        for wallet in sim.get_wallet_handles() {
-            let handled_payment_obligations = wallet.info().handled_payment_obligations.clone();
-            let payment_obligations = wallet.info().payment_obligations.clone();
-            let diff = handled_payment_obligations.difference(payment_obligations);
-            missed_payment_obligations.push((wallet.data().id, diff.len()));
-        }
         Self {
             tx_graph: sim.draw_tx_graph(),
-            missed_payment_obligations,
-            total_payment_obligations: sim.payment_data.len(),
+            sim: sim.clone(),
         }
     }
 
-    pub fn total_payment_obligations(&self) -> usize {
-        self.total_payment_obligations
+    /// Count of missed payment obligations per wallet, computed from current sim state.
+    pub fn missed_payment_obligations(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for wallet in self.sim.get_wallet_handles() {
+            let handled = wallet.info().handled_payment_obligations.clone();
+            let obligations = wallet.info().payment_obligations.clone();
+            let diff = handled.difference(obligations);
+            out.push((wallet.data().id.0, diff.len()));
+        }
+        out
     }
 
+    /// Block weights for each block, computed from current sim state.
+    pub fn block_weights(&self) -> Vec<u64> {
+        self.sim
+            .block_data
+            .iter()
+            .map(|block| {
+                let mut block_weight_wu = self.sim.get_tx(block.coinbase_tx).info().weight.to_wu();
+                for txid in &block.confirmed_txs {
+                    block_weight_wu += self.sim.get_tx(*txid).info().weight.to_wu();
+                }
+                block_weight_wu
+            })
+            .collect()
+    }
+
+    /// Total number of payment obligations, computed from current sim state.
+    pub fn total_payment_obligations(&self) -> usize {
+        self.sim.payment_data.len()
+    }
+
+    /// Percentage of payment obligations missed, computed from current sim state.
     pub fn percentage_of_payment_obligations_missed(&self) -> f64 {
-        let total_payment_obligations = self.total_payment_obligations();
-        self.missed_payment_obligations
+        let total = self.total_payment_obligations();
+        if total == 0 {
+            return 0.0;
+        }
+        self.missed_payment_obligations()
             .iter()
             .map(|(_, count)| count)
             .sum::<usize>() as f64
-            / total_payment_obligations as f64
+            / total as f64
     }
 
+    /// Total block weight, computed from current sim state.
+    pub fn total_block_weight(&self) -> u64 {
+        self.block_weights().iter().sum::<u64>()
+    }
+
+    /// Save the transaction graph to a file.
     pub fn save_tx_graph(&self, path: impl AsRef<Path>) {
         let graph_svg = graphviz_rust::exec(
             self.tx_graph.clone(),
@@ -756,7 +785,7 @@ impl SimulationResult {
         .unwrap();
         std::fs::write(path, graph_svg).unwrap();
     }
-    // TODO: utxo fragmentation, block space consumption, anon set metrics
+    // TODO: utxo fragmentation, anon set metrics
 }
 
 #[cfg(test)]
@@ -803,6 +832,10 @@ mod tests {
             result.percentage_of_payment_obligations_missed(),
             0.0,
             "With seed 42, missed percentage should be deterministic"
+        );
+        assert!(
+            result.total_block_weight() > 0,
+            "Simulation should consume some block space"
         );
     }
 
