@@ -14,7 +14,7 @@ use bdk_coin_select::{
     metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, Drain, DrainWeights, Target,
     TargetFee, TargetOutputs, TR_DUST_RELAY_MIN_VALUE,
 };
-use bitcoin::{transaction::InputWeightPrediction, Amount};
+use bitcoin::{transaction::predict_weight, transaction::InputWeightPrediction, Amount};
 use im::{HashMap, OrdSet, Vector};
 use log::{info, warn};
 
@@ -525,6 +525,7 @@ impl<'a> WalletHandleMut<'a> {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let spendable_utxos_count = self.handle().unspent_coins().count();
 
         // Filter out payment obligations that are already handled, or have an initiated/received payjoin
         // TODO: in the future where we want to support fallbacks we should not filter out initiated payjoins
@@ -554,6 +555,7 @@ impl<'a> WalletHandleMut<'a> {
             self.sim.current_timestep,
             // TODO active mp pj sessions
             self.id,
+            spendable_utxos_count,
         )
     }
 
@@ -565,6 +567,9 @@ impl<'a> WalletHandleMut<'a> {
             }
             Action::BatchSpend(po_ids) => {
                 self.handle_payment_obligations(po_ids);
+            }
+            Action::ConsolidateSelf(payment_obligation_id) => {
+                self.consolidate_self(payment_obligation_id);
             }
             Action::InitiatePayjoin(po) => {
                 let bulletin_board_id = self.create_payjoin(po);
@@ -624,7 +629,7 @@ impl<'a> WalletHandleMut<'a> {
 
         let action = all_actions
             .into_iter()
-            .max_by_key(|action| scorer.score_action(action, self))
+            .min_by_key(|action| scorer.action_cost(action, self))
             .unwrap_or(Action::Wait);
         info!("Wallet id: {:?} chose action: {:?}", self.id, action);
         self.do_action(&action);
@@ -641,6 +646,77 @@ impl<'a> WalletHandleMut<'a> {
             .txid_to_payment_obligation_ids
             .insert(tx_id, payment_obligation_ids.to_vec());
         self.broadcast(vec![tx_id]);
+    }
+
+    fn consolidate_self(&'a mut self, payment_obligation_id: &PaymentObligationId) {
+        let outpoints = self
+            .handle()
+            .unspent_coins()
+            .map(|o| o.outpoint())
+            .collect::<Vec<_>>();
+
+        if outpoints.len() <= 1 {
+            return;
+        }
+
+        let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
+        let total_input: Amount = outpoints
+            .iter()
+            .map(|outpoint| OutputHandle::new(self.sim, *outpoint).data().amount)
+            .sum();
+
+        let payment_output_script_len = payment_obligation
+            .to
+            .with(self.sim)
+            .data()
+            .script_type
+            .output_script_len();
+        let change_output_script_len = self.data().script_type.output_script_len();
+        let weight = predict_weight(
+            outpoints.iter().map(|outpoint| {
+                InputWeightPrediction::from(OutputHandle::new(self.sim, *outpoint))
+            }),
+            [payment_output_script_len, change_output_script_len],
+        );
+        let fee_rate_sat_per_vb = 1u64;
+        let vbytes = (weight.to_wu() + 3) / 4;
+        let fee_sat = vbytes.saturating_mul(fee_rate_sat_per_vb);
+
+        if total_input.to_sat() <= payment_obligation.amount.to_sat() + fee_sat {
+            return;
+        }
+
+        let change_value = total_input.to_sat() - payment_obligation.amount.to_sat() - fee_sat;
+        if change_value < TR_DUST_RELAY_MIN_VALUE {
+            return;
+        }
+
+        let destination = self.new_address();
+        let payment_address = payment_obligation.to.with_mut(self.sim).new_address();
+        let mut tx = TxData::default();
+        tx.inputs = outpoints
+            .iter()
+            .map(|outpoint| Input {
+                outpoint: *outpoint,
+            })
+            .collect();
+        tx.outputs = vec![
+            Output {
+                amount: payment_obligation.amount,
+                address_id: payment_address,
+            },
+            Output {
+                amount: Amount::from_sat(change_value),
+                address_id: destination,
+            },
+        ];
+
+        self.ack_transaction(&mut tx);
+        let tx_id = self.spend_tx(tx);
+        self.info_mut()
+            .txid_to_payment_obligation_ids
+            .insert(tx_id, vec![*payment_obligation_id]);
+        self.broadcast(std::iter::once(tx_id));
     }
 
     fn ack_transaction(&self, tx: &mut TxData) {

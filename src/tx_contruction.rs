@@ -242,6 +242,7 @@ mod tests {
                     privacy_weight: 0.0,
                     payment_obligation_weight: 0.0,
                     coordination_weight: 0.0,
+                    consolidation_weight: 0.0,
                 },
                 script_type: crate::script_type::ScriptType::P2tr,
             }];
@@ -260,6 +261,7 @@ mod tests {
                 privacy_weight: 0.0,
                 payment_obligation_weight: 0.0,
                 coordination_weight: 0.0,
+                consolidation_weight: 0.0,
             };
             let wallet = sim.new_wallet(
                 CompositeStrategy {
@@ -325,6 +327,7 @@ mod tests {
                 privacy_weight: 0.0,
                 payment_obligation_weight: 0.0,
                 coordination_weight: 0.0,
+                consolidation_weight: 0.0,
             };
             let wallet = sim.new_wallet(
                 CompositeStrategy {

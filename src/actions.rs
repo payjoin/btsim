@@ -1,11 +1,11 @@
 use std::{collections::HashSet, iter::Sum, ops::Add};
 
-use bitcoin::Amount;
 use log::debug;
 
 use crate::{
     bulletin_board::BulletinBoardId,
     message::{MessageId, PayjoinProposal},
+    transaction::TxId,
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
     Simulation, TimeStep,
 };
@@ -44,6 +44,8 @@ pub(crate) enum Action {
     UnilateralSpend(PaymentObligationId),
     /// Batch spend multiple payment obligations
     BatchSpend(Vec<PaymentObligationId>),
+    /// Pay a payment obligation while consolidating all UTXOs into change
+    ConsolidateSelf(PaymentObligationId),
     /// Initiate a payjoin with a counterparty
     InitiatePayjoin(PaymentObligationId),
     /// respond to a payjoin proposal
@@ -70,29 +72,28 @@ pub(crate) enum PredictedOutcome {
     RespondToPayjoin(RespondToPayjoinOutcome),
     InitiateMultiPartyPayjoin(InitiateMultiPartyPayjoinOutcome),
     ParticipateMultiPartyPayjoin(ParticipateMultiPartyPayjoinOutcome),
+    Consolidation(ConsolidationOutcome),
 }
 
 #[derive(Debug)]
 pub(crate) struct PaymentObligationHandledOutcome {
-    /// Payment obligation amount
-    amount_handled: f64,
-    /// Balance difference after the action
-    balance_difference: f64,
+    /// Base cost: fee_paid + amount handled. In sats
+    base_cost: f64,
     /// Time left on the payment obligation
     time_left: i32,
 }
 
 impl PaymentObligationHandledOutcome {
-    fn score(&self, payment_obligation_weight: f64) -> ActionScore {
+    fn cost(&self, payment_obligation_weight: f64) -> ActionCost {
         let points = [
             (0.0, 2.0 * payment_obligation_weight),
             (2.0, payment_obligation_weight),
-            (5.0, 0.0),
+            (5.0, 0.0), // There may be other oppurtunities if waited a longer
         ];
-        let utility = piecewise_linear(self.time_left as f64, &points);
-        let score = self.balance_difference + (self.amount_handled * utility);
-        debug!("PaymentObligationHandledEvent score: {:?}", score);
-        ActionScore(score)
+        let utility = piecewise_linear(self.time_left as f64, &points); // Also in denominated in sats.
+        let cost = self.base_cost - utility;
+        debug!("PaymentObligationHandledEvent cost: {:?}", cost);
+        ActionCost(cost)
     }
 }
 
@@ -100,58 +101,41 @@ impl PaymentObligationHandledOutcome {
 pub(crate) struct InitiatePayjoinOutcome {
     /// Time left on the payment obligation
     time_left: i32,
-    /// Amount of the payment obligation
-    amount_handled: f64,
-    /// Balance difference after the action
-    balance_difference: f64,
-    /// Fee savings from the payjoin
-    fee_savings: Amount,
-    // TODO: somekind of privacy gained metric?
+    /// Base cost: fee_paid + amount handled. In sats
+    base_cost: f64,
 }
 
 impl InitiatePayjoinOutcome {
     /// Batching anxiety should increase and payjoin utility should decrease the closer the deadline is.
     /// This can be modeled as a inverse cubic function of the time left.
-    /// Fee savings and privacy are scored independently via per-dimension weights.
-    fn score(&self, privacy_weight: f64, fee_savings_weight: f64) -> ActionScore {
+    /// privacy are evaluated independently via per-dimension weights.
+    /// TODO: This privacy term is being mis used here. Its just capaturing you value doing payjoins not privacy. A better way to compare the value of different outcomes is just
+    /// fee savings. Which should be reflected in the base cost anways.
+    fn cost(&self, privacy_weight: f64) -> ActionCost {
         let points = [
             (0.0, 0.0),
             (2.0, privacy_weight),
             (5.0, 5.0 * privacy_weight),
         ];
         let utility = piecewise_linear(self.time_left as f64, &points);
-
-        let base_score = self.balance_difference + (self.amount_handled * utility);
-        let fee_benefit =
-            self.fee_savings.to_float_in(bitcoin::Denomination::Satoshi) * fee_savings_weight;
-
-        let score = base_score + fee_benefit;
-        debug!("InitiatePayjoinEvent score: {:?}", score);
-        ActionScore(score)
+        let cost = self.base_cost - utility;
+        debug!("InitiatePayjoinEvent cost: {:?}", cost);
+        ActionCost(cost)
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct RespondToPayjoinOutcome {
-    /// Amount of the payment obligation
-    amount_handled: f64,
-    /// Balance difference after the action
-    balance_difference: f64,
-    /// Fee savings from the payjoin
-    fee_savings: Amount,
+    /// Base cost: fee_paid + amount handled. In sats
+    base_cost: f64,
 }
 
 impl RespondToPayjoinOutcome {
-    fn score(&self, privacy_weight: f64) -> ActionScore {
+    fn cost(&self) -> ActionCost {
         // Responding to a payjoin should always be better than unilaterally spending at this point
         // As there is no interaction cost. TODO in the future we will want to model the cost of doing
         // the last round of interaction with the counterparty as a function of rounds remaining.
-
-        let score = self.balance_difference + (privacy_weight * self.amount_handled);
-        // TODO: add fee_savings_weight * fee_savings once fee savings are calculated
-        debug!("RespondToPayjoinEvent score: {:?}", score);
-
-        ActionScore(score)
+        ActionCost(0.0)
     }
 }
 
@@ -159,20 +143,18 @@ impl RespondToPayjoinOutcome {
 pub(crate) struct InitiateMultiPartyPayjoinOutcome {
     /// Time left on the payment obligation
     time_left: i32,
-    /// Amount of the payment obligation
-    amount_handled: f64,
-    /// Balance difference after the action
-    balance_difference: f64,
+    /// Base cost: fee_paid + amount handled. In sats
+    base_cost: f64,
     /// Upper bound on the number of participants in the multi-party payjoin
     max_participants: u32,
 }
 
 impl InitiateMultiPartyPayjoinOutcome {
-    fn score(&self, _coordination_weight: f64) -> ActionScore {
-        // For now the score for initiating a multi-party payjoin is really high so it always happens no matter what
-        let score = self.amount_handled * 100.0;
-        debug!("InitiateMultiPartyPayjoinEvent score: {:?}", score);
-        ActionScore(score)
+    fn cost(&self) -> ActionCost {
+        // TODO This should have a similar "shape" as the initiate payjoin but with a different utility function.
+        // taking into accounts the number of participants, their inputs.
+        // For now this costs nothing as testing scaffolding.
+        ActionCost(0.0)
     }
 }
 
@@ -180,16 +162,28 @@ impl InitiateMultiPartyPayjoinOutcome {
 pub(crate) struct ParticipateMultiPartyPayjoinOutcome {
     /// Time left on the payment obligation
     time_left: i32,
-    /// Amount of the payment obligation
-    amount_handled: f64,
+    /// Base cost: fee_paid + amount handled. In sats
+    base_cost: f64,
 }
 
 impl ParticipateMultiPartyPayjoinOutcome {
-    fn score(&self, _coordination_weight: f64) -> ActionScore {
-        // TODO: score the participation as a linear function of the progression of the session
-        let score = self.amount_handled * 100.0;
-        debug!("ParticipateMultiPartyPayjoinEvent score: {:?}", score);
-        ActionScore(score)
+    fn cost(&self) -> ActionCost {
+        // TODO: model the participation utility as a linear function of the progression of the session
+        // For now this costs nothing as testing scaffolding.
+        ActionCost(0.0)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ConsolidationOutcome {
+    /// Base cost: fee_paid in sats.
+    base_cost: f64,
+}
+
+impl ConsolidationOutcome {
+    fn cost(&self, _consolidation_weight: f64) -> ActionCost {
+        debug!("ConsolidationEvent cost: 0");
+        ActionCost(0.0)
     }
 }
 
@@ -202,6 +196,7 @@ pub(crate) struct WalletView {
     new_multi_party_payjoins: Vec<(BulletinBoardId, MessageId)>,
     current_timestep: TimeStep,
     wallet_id: WalletId,
+    spendable_utxos_count: usize,
     // TODO: utxos, feerate, cospend oppurtunities, etc.
 }
 
@@ -213,6 +208,7 @@ impl WalletView {
         active_multi_party_payjoins: Vec<BulletinBoardId>,
         current_timestep: TimeStep,
         wallet_id: WalletId,
+        spendable_utxos_count: usize,
     ) -> Self {
         Self {
             payment_obligations,
@@ -221,6 +217,7 @@ impl WalletView {
             new_multi_party_payjoins,
             current_timestep,
             wallet_id,
+            spendable_utxos_count,
         }
     }
 }
@@ -228,18 +225,15 @@ fn get_payment_obligation_handled_outcome(
     payment_obligation_id: &PaymentObligationId,
     sim: &Simulation,
     current_timestep: TimeStep,
+    fee_paid: f64,
 ) -> PaymentObligationHandledOutcome {
     let payment_obligation = payment_obligation_id.with(&sim).data();
     let deadline = payment_obligation.deadline;
-    let balance_difference = payment_obligation
-        .amount
-        .to_float_in(bitcoin::Denomination::Satoshi)
-        * -1.0;
     PaymentObligationHandledOutcome {
-        amount_handled: payment_obligation
-            .amount
-            .to_float_in(bitcoin::Denomination::Satoshi),
-        balance_difference,
+        base_cost: fee_paid
+            + payment_obligation
+                .amount
+                .to_float_in(bitcoin::Denomination::Satoshi),
         time_left: deadline.0 as i32 - current_timestep.0 as i32,
     }
 }
@@ -256,20 +250,17 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
     new_wallet_handle.do_action(action);
     let new_wallet_handle = wallet_id.with(&sim);
     let new_info = new_wallet_handle.info();
+    let fee_paid_total = action_fee_paid_sats(&old_info, new_info, &sim);
 
     if let Action::UnilateralSpend(payment_obligation_id) = action {
         let payment_obligation = payment_obligation_id.with(&sim).data();
         let deadline = payment_obligation.deadline;
-        let balance_difference = payment_obligation
-            .amount
-            .to_float_in(bitcoin::Denomination::Satoshi)
-            * -1.0;
         events.push(PredictedOutcome::PaymentObligationsHandled(vec![
             PaymentObligationHandledOutcome {
-                amount_handled: payment_obligation
-                    .amount
-                    .to_float_in(bitcoin::Denomination::Satoshi),
-                balance_difference,
+                base_cost: fee_paid_total
+                    + payment_obligation
+                        .amount
+                        .to_float_in(bitcoin::Denomination::Satoshi),
                 time_left: deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
             },
         ]));
@@ -277,14 +268,41 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
 
     if let Action::BatchSpend(payment_obligation_ids) = action {
         let mut outcomes = vec![];
+        let total_amount_handled: f64 = payment_obligation_ids
+            .iter()
+            .map(|payment_obligation_id| {
+                payment_obligation_id
+                    .with(&sim)
+                    .data()
+                    .amount
+                    .to_float_in(bitcoin::Denomination::Satoshi)
+            })
+            .sum();
         for payment_obligation_id in payment_obligation_ids.iter() {
+            let amount_handled = payment_obligation_id
+                .with(&sim)
+                .data()
+                .amount
+                .to_float_in(bitcoin::Denomination::Satoshi);
+            let fee_paid = if total_amount_handled > 0.0 {
+                fee_paid_total * (amount_handled / total_amount_handled)
+            } else {
+                0.0
+            };
             outcomes.push(get_payment_obligation_handled_outcome(
                 payment_obligation_id,
                 &sim,
                 wallet_view.current_timestep,
+                fee_paid,
             ));
         }
         events.push(PredictedOutcome::PaymentObligationsHandled(outcomes));
+    }
+
+    if matches!(action, Action::ConsolidateSelf(_)) {
+        events.push(PredictedOutcome::Consolidation(ConsolidationOutcome {
+            base_cost: fee_paid_total,
+        }));
     }
 
     // Check if the wallet initiated a payjoin
@@ -297,12 +315,9 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
     {
         let po = payment_obligation_id.with(&sim).data();
         let amount_handled = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
-        let balance_difference = amount_handled * -1.0; // TODO: fee's are not factored in yet
         events.push(PredictedOutcome::InitiatePayjoin(InitiatePayjoinOutcome {
             time_left: po.deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
-            amount_handled,
-            balance_difference,
-            fee_savings: Amount::ZERO, // TODO: implement this
+            base_cost: fee_paid_total + amount_handled,
         }));
     }
 
@@ -315,17 +330,28 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
     {
         let po = payment_obligation_id.with(&sim).data();
         let amount_handled = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
-        let balance_difference = amount_handled * -1.0; // TODO: fee's are not factored in yet
         events.push(PredictedOutcome::RespondToPayjoin(
             RespondToPayjoinOutcome {
-                amount_handled,
-                balance_difference,
-                fee_savings: Amount::ZERO, // TODO: implement this
+                base_cost: fee_paid_total + amount_handled,
             },
         ));
     }
 
     events
+}
+
+fn action_fee_paid_sats(
+    old_info: &crate::wallet::WalletInfo,
+    new_info: &crate::wallet::WalletInfo,
+    sim: &Simulation,
+) -> f64 {
+    let old_txs: HashSet<TxId> = old_info.broadcast_transactions.iter().copied().collect();
+    new_info
+        .broadcast_transactions
+        .iter()
+        .filter(|txid| !old_txs.contains(txid))
+        .map(|txid| txid.with(sim).info().fee.to_sat() as f64)
+        .sum()
 }
 
 /// Strategies will pick one action to minimize their cost
@@ -336,24 +362,28 @@ pub(crate) trait Strategy: std::fmt::Debug {
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
-pub(crate) struct ActionScore(f64);
+// TODO: this should just be bitcoin::Amount
+pub(crate) struct ActionCost(f64);
 
-impl Sum for ActionScore {
+// Flat base cost applied to any action, including waiting.
+const INHERENT_ACTION_COST: f64 = 0.0;
+
+impl Sum for ActionCost {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         Self(iter.map(|s| s.0).sum())
     }
 }
 
-impl Eq for ActionScore {}
+impl Eq for ActionCost {}
 
-impl Ord for ActionScore {
+impl Ord for ActionCost {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         assert!(!self.0.is_nan() && !other.0.is_nan());
         self.0.partial_cmp(&other.0).expect("Checked for NaNs")
     }
 }
 
-impl Add for ActionScore {
+impl Add for ActionCost {
     type Output = Self;
     fn add(self, other: Self) -> Self {
         Self(self.0 + other.0)
@@ -375,6 +405,25 @@ impl Strategy for UnilateralSpender {
             actions.push(Action::UnilateralSpend(po.id));
         }
 
+        actions
+    }
+
+    fn clone_box(&self) -> Box<dyn Strategy> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Consolidator;
+
+impl Strategy for Consolidator {
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for po in state.payment_obligations.iter() {
+            actions.push(Action::UnilateralSpend(po.id));
+            actions.push(Action::ConsolidateSelf(po.id));
+        }
+        actions.push(Action::Wait);
         actions
     }
 
@@ -557,47 +606,63 @@ impl Clone for Box<dyn Strategy> {
 pub(crate) struct CompositeScorer {
     /// Weight applied to fee savings in sats from payjoin transactions
     pub(crate) fee_savings_weight: f64,
-    /// Weight applied to privacy score from payjoin transactions
+    /// Weight applied to privacy utility from payjoin transactions
     pub(crate) privacy_weight: f64,
     /// Weight applied to deadline urgency for payment obligations
     pub(crate) payment_obligation_weight: f64,
     /// Weight applied to multi-party coordination value
     pub(crate) coordination_weight: f64,
+    /// Weight applied to UTXO consolidation utility
+    pub(crate) consolidation_weight: f64,
 }
 
 impl CompositeScorer {
-    pub(crate) fn score_action(
+    pub(crate) fn action_cost(
         &self,
         action: &Action,
         wallet_handle: &WalletHandleMut,
-    ) -> ActionScore {
+    ) -> ActionCost {
         let events = simulate_one_action(wallet_handle, action);
         // For now each action should only result in one event or none if we are waiting
-        // TODO: wallets should evaluate waiting and score it high if they are expecting payments from payjoin compatible wallets
+        // TODO: wallets should evaluate waiting and reduce its cost if they are expecting payments from payjoin compatible wallets
         debug_assert!(events.len() <= 1);
-        let mut score = ActionScore(0.0);
+        let mut cost = ActionCost(INHERENT_ACTION_COST);
         for event in events {
             match event {
                 PredictedOutcome::PaymentObligationsHandled(outcomes) => {
                     for outcome in outcomes.iter() {
-                        score = score + outcome.score(self.payment_obligation_weight);
+                        cost = cost + outcome.cost(self.payment_obligation_weight);
                     }
                 }
                 PredictedOutcome::InitiatePayjoin(event) => {
-                    score = score + event.score(self.privacy_weight, self.fee_savings_weight);
+                    cost = cost + event.cost(self.privacy_weight);
                 }
                 PredictedOutcome::RespondToPayjoin(event) => {
-                    score = score + event.score(self.privacy_weight);
+                    cost = cost + event.cost();
                 }
                 PredictedOutcome::InitiateMultiPartyPayjoin(event) => {
-                    score = score + event.score(self.coordination_weight);
+                    cost = cost + event.cost();
                 }
                 PredictedOutcome::ParticipateMultiPartyPayjoin(event) => {
-                    score = score + event.score(self.coordination_weight);
+                    cost = cost + event.cost();
+                }
+                PredictedOutcome::Consolidation(event) => {
+                    cost = cost + event.cost(self.consolidation_weight);
                 }
             }
         }
-        score
+        if matches!(action, Action::Wait) {
+            let view = wallet_handle.wallet_view();
+            let points = [(0.0, 2.0), (2.0, 1.0), (5.0, 0.0)];
+            let mut penalty = 0.0;
+            for po in view.payment_obligations.iter() {
+                let time_left = po.deadline.0 as i32 - view.current_timestep.0 as i32;
+                let urgency = piecewise_linear(time_left as f64, &points);
+                penalty += po.amount.to_sat() as f64 * urgency * self.payment_obligation_weight;
+            }
+            cost = cost + ActionCost(penalty);
+        }
+        cost
     }
 }
 
@@ -605,6 +670,7 @@ impl CompositeScorer {
 pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
     match name {
         "UnilateralSpender" => Ok(Box::new(UnilateralSpender)),
+        "Consolidator" => Ok(Box::new(Consolidator)),
         "BatchSpender" => Ok(Box::new(BatchSpender)),
         "PayjoinStrategy" => Ok(Box::new(PayjoinStrategy)),
         "MultipartyPayjoinInitiatorStrategy" => Ok(Box::new(MultipartyPayjoinInitiatorStrategy)),
@@ -633,6 +699,7 @@ mod tests {
             vec![],
             TimeStep(0),
             WalletId(0),
+            0,
         )
     }
 
@@ -652,6 +719,38 @@ mod tests {
         let actions = strategy.enumerate_candidate_actions(&view);
 
         assert_eq!(actions.len(), 1);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::UnilateralSpend(_))));
+    }
+
+    #[test]
+    fn test_unilateral_consolidate_spender() {
+        let strategy = Consolidator;
+        let po = PaymentObligationData {
+            id: PaymentObligationId(0),
+            deadline: TimeStep(100),
+            reveal_time: TimeStep(0),
+            amount: Amount::from_sat(1000),
+            from: WalletId(0),
+            to: WalletId(1),
+        };
+        let view = WalletView::new(
+            vec![po],
+            vec![],
+            vec![],
+            vec![],
+            TimeStep(0),
+            WalletId(0),
+            3,
+        );
+
+        let actions = strategy.enumerate_candidate_actions(&view);
+
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::ConsolidateSelf(_))));
+        assert!(actions.iter().any(|a| matches!(a, Action::Wait)));
         assert!(actions
             .iter()
             .any(|a| matches!(a, Action::UnilateralSpend(_))));
@@ -858,6 +957,7 @@ mod tests {
             vec![],
             TimeStep(0),
             WalletId(1), // Wallet 1, not 0
+            0,
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -888,6 +988,7 @@ mod tests {
             vec![],                                   // No active sessions yet
             TimeStep(0),
             WalletId(1),
+            0,
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -919,6 +1020,7 @@ mod tests {
             vec![BulletinBoardId(0)], // Active session
             TimeStep(0),
             WalletId(1),
+            0,
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -950,6 +1052,7 @@ mod tests {
             vec![BulletinBoardId(1)],
             TimeStep(0),
             WalletId(1),
+            0,
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);

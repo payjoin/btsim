@@ -10,6 +10,7 @@ use rand_distr::Distribution;
 use rand_distr::Geometric;
 use rand_pcg::rand_core::{RngCore, SeedableRng};
 use rand_pcg::Pcg64;
+use serde::Serialize;
 
 use crate::bulletin_board::BroadcastMessageType;
 use crate::bulletin_board::BulletinBoardData;
@@ -279,6 +280,7 @@ impl SimulationBuilder {
                 privacy_weight: wallet_type.scorer.privacy_weight,
                 payment_obligation_weight: wallet_type.scorer.payment_obligation_weight,
                 coordination_weight: wallet_type.scorer.coordination_weight,
+                consolidation_weight: wallet_type.scorer.consolidation_weight,
             };
 
             for _ in 0..wallet_type.count {
@@ -714,39 +716,175 @@ impl std::fmt::Display for Simulation {
 // Util methods dont seem too useful here.
 pub struct SimulationResult {
     tx_graph: dot_structures::Graph,
-    missed_payment_obligations: Vec<(WalletId, usize)>,
+    sim: Simulation,
+}
+
+pub struct WalletUtxoStats {
+    pub wallet_id: usize,
+    pub dust_count: usize,
+    pub total_count: usize,
+    pub p50: Option<Amount>,
+    pub p90: Option<Amount>,
+}
+
+#[derive(Serialize)]
+struct SimulationResultJson {
     total_payment_obligations: usize,
+    percentage_payment_obligations_missed: f64,
+    total_block_weight_wu: u64,
+    average_fee_cost_sats: u64,
+    dust_utxo_count: usize,
+    utxo_size_distribution_sats: Vec<u64>,
+    wallet_utxo_stats: Vec<WalletUtxoStatsJson>,
+}
+
+#[derive(Serialize)]
+struct WalletUtxoStatsJson {
+    wallet_id: usize,
+    dust_count: usize,
+    total_count: usize,
+    p50_sats: Option<u64>,
+    p90_sats: Option<u64>,
 }
 
 impl SimulationResult {
     pub fn new(sim: &Simulation) -> Self {
-        let mut missed_payment_obligations = Vec::new();
-        for wallet in sim.get_wallet_handles() {
-            let handled_payment_obligations = wallet.info().handled_payment_obligations.clone();
-            let payment_obligations = wallet.info().payment_obligations.clone();
-            let diff = handled_payment_obligations.difference(payment_obligations);
-            missed_payment_obligations.push((wallet.data().id, diff.len()));
-        }
         Self {
             tx_graph: sim.draw_tx_graph(),
-            missed_payment_obligations,
-            total_payment_obligations: sim.payment_data.len(),
+            sim: sim.clone(),
         }
     }
 
-    pub fn total_payment_obligations(&self) -> usize {
-        self.total_payment_obligations
+    /// Count of missed payment obligations per wallet, computed from current sim state.
+    pub fn missed_payment_obligations(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for wallet in self.sim.get_wallet_handles() {
+            let handled = wallet.info().handled_payment_obligations.clone();
+            let obligations = wallet.info().payment_obligations.clone();
+            let diff = handled.difference(obligations);
+            out.push((wallet.data().id.0, diff.len()));
+        }
+        out
     }
 
+    /// Block weights for each block, computed from current sim state.
+    pub fn block_weights(&self) -> Vec<u64> {
+        self.sim
+            .block_data
+            .iter()
+            .map(|block| {
+                let mut block_weight_wu = self.sim.get_tx(block.coinbase_tx).info().weight.to_wu();
+                for txid in &block.confirmed_txs {
+                    block_weight_wu += self.sim.get_tx(*txid).info().weight.to_wu();
+                }
+                block_weight_wu
+            })
+            .collect()
+    }
+
+    /// Total number of payment obligations, computed from current sim state.
+    pub fn total_payment_obligations(&self) -> usize {
+        self.sim.payment_data.len()
+    }
+
+    /// Percentage of payment obligations missed, computed from current sim state.
     pub fn percentage_of_payment_obligations_missed(&self) -> f64 {
-        let total_payment_obligations = self.total_payment_obligations();
-        self.missed_payment_obligations
+        let total = self.total_payment_obligations();
+        if total == 0 {
+            return 0.0;
+        }
+        self.missed_payment_obligations()
             .iter()
             .map(|(_, count)| count)
             .sum::<usize>() as f64
-            / total_payment_obligations as f64
+            / total as f64
     }
 
+    /// Total block weight, computed from current sim state.
+    pub fn total_block_weight(&self) -> u64 {
+        self.block_weights().iter().sum::<u64>()
+    }
+
+    /// Average fee cost across non-coinbase transactions, computed from current sim state.
+    pub fn average_fee_cost(&self) -> Amount {
+        let mut total_fee_sat = 0u64;
+        let mut counted = 0u64;
+        for (tx, info) in self.sim.tx_data.iter().zip(self.sim.tx_info.iter()) {
+            if tx.inputs.is_empty() {
+                continue;
+            }
+            total_fee_sat = total_fee_sat.saturating_add(info.fee.to_sat());
+            counted = counted.saturating_add(1);
+        }
+        if counted == 0 {
+            return Amount::from_sat(0);
+        }
+        Amount::from_sat(total_fee_sat / counted)
+    }
+
+    /// Count of dust UTXOs (<= 546 sats), computed from confirmed UTXOs.
+    pub fn dust_utxo_count(&self) -> usize {
+        const DUST_THRESHOLD_SATS: u64 = 546;
+        self.sim
+            .wallet_data
+            .iter()
+            .flat_map(|wallet| {
+                let info = &self.sim.wallet_info[wallet.last_wallet_info_id.0];
+                info.confirmed_utxos.iter()
+            })
+            .filter(|outpoint| {
+                outpoint.with(&self.sim).data().amount.to_sat() <= DUST_THRESHOLD_SATS
+            })
+            .count()
+    }
+
+    /// Sorted list of confirmed UTXO sizes, computed from current sim state.
+    pub fn utxo_size_distribution(&self) -> Vec<Amount> {
+        let mut amounts: Vec<Amount> = self
+            .sim
+            .wallet_data
+            .iter()
+            .flat_map(|wallet| {
+                let info = &self.sim.wallet_info[wallet.last_wallet_info_id.0];
+                info.confirmed_utxos.iter()
+            })
+            .map(|outpoint| outpoint.with(&self.sim).data().amount)
+            .collect();
+        amounts.sort_by_key(|amount| amount.to_sat());
+        amounts
+    }
+
+    /// Per-wallet dust counts and size percentiles (p50, p90) for confirmed UTXOs.
+    pub fn wallet_utxo_stats(&self) -> Vec<WalletUtxoStats> {
+        const DUST_THRESHOLD_SATS: u64 = 546;
+        self.sim
+            .wallet_data
+            .iter()
+            .map(|wallet| {
+                let info = &self.sim.wallet_info[wallet.last_wallet_info_id.0];
+                let mut amounts: Vec<Amount> = info
+                    .confirmed_utxos
+                    .iter()
+                    .map(|outpoint| outpoint.with(&self.sim).data().amount)
+                    .collect();
+                amounts.sort_by_key(|amount| amount.to_sat());
+                let dust_count = amounts
+                    .iter()
+                    .filter(|amount| amount.to_sat() <= DUST_THRESHOLD_SATS)
+                    .count();
+                let total_count = amounts.len();
+                WalletUtxoStats {
+                    wallet_id: wallet.id.0,
+                    dust_count,
+                    total_count,
+                    p50: percentile_amount(&amounts, 0.50),
+                    p90: percentile_amount(&amounts, 0.90),
+                }
+            })
+            .collect()
+    }
+
+    /// Save the transaction graph to a file.
     pub fn save_tx_graph(&self, path: impl AsRef<Path>) {
         let graph_svg = graphviz_rust::exec(
             self.tx_graph.clone(),
@@ -756,7 +894,48 @@ impl SimulationResult {
         .unwrap();
         std::fs::write(path, graph_svg).unwrap();
     }
-    // TODO: utxo fragmentation, block space consumption, anon set metrics
+
+    /// Save simulation results as a JSON file.
+    pub fn save_results_json(&self, path: impl AsRef<Path>) {
+        let utxo_sizes = self
+            .utxo_size_distribution()
+            .into_iter()
+            .map(|amount| amount.to_sat())
+            .collect();
+        let wallet_utxo_stats = self
+            .wallet_utxo_stats()
+            .into_iter()
+            .map(|stats| WalletUtxoStatsJson {
+                wallet_id: stats.wallet_id,
+                dust_count: stats.dust_count,
+                total_count: stats.total_count,
+                p50_sats: stats.p50.map(|amount| amount.to_sat()),
+                p90_sats: stats.p90.map(|amount| amount.to_sat()),
+            })
+            .collect();
+        let result = SimulationResultJson {
+            total_payment_obligations: self.total_payment_obligations(),
+            percentage_payment_obligations_missed: self.percentage_of_payment_obligations_missed(),
+            total_block_weight_wu: self.total_block_weight(),
+            average_fee_cost_sats: self.average_fee_cost().to_sat(),
+            dust_utxo_count: self.dust_utxo_count(),
+            utxo_size_distribution_sats: utxo_sizes,
+            wallet_utxo_stats,
+        };
+        let file = std::fs::File::create(path).unwrap();
+        serde_json::to_writer_pretty(file, &result).unwrap();
+    }
+    // TODO: anon set metrics
+}
+
+fn percentile_amount(sorted: &[Amount], percentile: f64) -> Option<Amount> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let n = sorted.len() as f64;
+    let rank = (percentile * n).ceil().max(1.0);
+    let idx = (rank as usize).saturating_sub(1);
+    sorted.get(idx).copied()
 }
 
 #[cfg(test)]
@@ -780,6 +959,7 @@ mod tests {
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
                 coordination_weight: 0.0,
+                consolidation_weight: 0.0,
             },
             script_type: ScriptType::P2tr,
         }];
@@ -804,6 +984,10 @@ mod tests {
             0.0,
             "With seed 42, missed percentage should be deterministic"
         );
+        assert!(
+            result.total_block_weight() > 0,
+            "Simulation should consume some block space"
+        );
     }
 
     #[test]
@@ -822,6 +1006,7 @@ mod tests {
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
                 coordination_weight: 0.0,
+                consolidation_weight: 0.0,
             },
             script_type: ScriptType::P2tr,
         }];
@@ -834,6 +1019,7 @@ mod tests {
             privacy_weight: 2.0,
             payment_obligation_weight: 1.0,
             coordination_weight: 0.0,
+            consolidation_weight: 0.0,
         };
         let alice_strategies = vec![
             create_strategy("UnilateralSpender").unwrap(),
@@ -1034,6 +1220,7 @@ mod tests {
                     privacy_weight: 2.0,
                     payment_obligation_weight: 1.0,
                     coordination_weight: 0.0,
+                    consolidation_weight: 0.0,
                 },
                 script_type,
             }];
@@ -1077,5 +1264,99 @@ mod tests {
 
             assert_eq!(spend_tx.with(&sim).info().weight, expected_weight);
         }
+    }
+
+    #[test]
+    fn test_consolidation_strategy_pays_and_consolidates() {
+        use crate::config::{ScorerConfig, WalletTypeConfig};
+
+        let wallet_types = vec![
+            WalletTypeConfig {
+                name: "consolidator".to_string(),
+                count: 1,
+                strategies: vec!["Consolidator".to_string()],
+                scorer: ScorerConfig {
+                    fee_savings_weight: 0.0,
+                    privacy_weight: 0.0,
+                    payment_obligation_weight: 1.0,
+                    coordination_weight: 0.0,
+                    consolidation_weight: 1000.0,
+                },
+                script_type: ScriptType::P2tr,
+            },
+            WalletTypeConfig {
+                name: "receiver".to_string(),
+                count: 1,
+                strategies: vec!["UnilateralSpender".to_string()],
+                scorer: ScorerConfig {
+                    fee_savings_weight: 0.0,
+                    privacy_weight: 0.0,
+                    payment_obligation_weight: 1.0,
+                    coordination_weight: 0.0,
+                    consolidation_weight: 0.0,
+                },
+                script_type: ScriptType::P2tr,
+            },
+        ];
+
+        let mut sim = SimulationBuilder::new(42, wallet_types, 8, 1, 4).build();
+        sim.build_universe();
+        sim.run();
+
+        let consolidator = WalletId(0).with(&sim);
+
+        assert!(
+            !consolidator.info().payment_obligations.is_empty(),
+            "Consolidator should have payment obligations"
+        );
+        assert!(
+            !consolidator.info().handled_payment_obligations.is_empty(),
+            "Consolidator should handle payment obligations"
+        );
+
+        let payment_receiver = consolidator
+            .info()
+            .payment_obligations
+            .iter()
+            .next()
+            .map(|po_id| po_id.with(&sim).data().to)
+            .expect("Consolidator should have a payment receiver");
+
+        let mut saw_consolidation = false;
+        for txid in consolidator.data().own_transactions.iter() {
+            let tx = txid.with(&sim);
+            if tx.data().inputs.len() <= 1 {
+                continue;
+            }
+            if tx.data().outputs.len() != 2 {
+                continue;
+            }
+            if !consolidator
+                .info()
+                .txid_to_payment_obligation_ids
+                .contains_key(txid)
+            {
+                continue;
+            }
+            let output_wallets: Vec<_> = tx
+                .data()
+                .outputs
+                .iter()
+                .map(|output| output.address_id.with(&sim).data().wallet_id)
+                .collect();
+            if !output_wallets.contains(&consolidator.id) {
+                continue;
+            }
+            if !output_wallets.contains(&payment_receiver) {
+                continue;
+            }
+            saw_consolidation = true;
+            break;
+        }
+
+        assert!(
+            saw_consolidation,
+            "Consolidator should broadcast a self-consolidation transaction"
+        );
     }
 }

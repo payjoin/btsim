@@ -36,6 +36,8 @@ pub struct ScorerConfig {
     pub payment_obligation_weight: f64,
     /// Weight applied to multi-party coordination value
     pub coordination_weight: f64,
+    /// Weight applied to UTXO consolidation utility
+    pub consolidation_weight: f64,
 }
 
 impl Config {
@@ -46,6 +48,7 @@ impl Config {
         // Validate strategy names
         let valid_strategies = [
             "UnilateralSpender",
+            "Consolidator",
             "BatchSpender",
             "PayjoinStrategy",
             "MultipartyPayjoinInitiatorStrategy",
