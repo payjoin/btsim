@@ -279,6 +279,7 @@ impl SimulationBuilder {
                 privacy_weight: wallet_type.scorer.privacy_weight,
                 payment_obligation_weight: wallet_type.scorer.payment_obligation_weight,
                 coordination_weight: wallet_type.scorer.coordination_weight,
+                consolidation_weight: wallet_type.scorer.consolidation_weight,
             };
 
             for _ in 0..wallet_type.count {
@@ -809,6 +810,7 @@ mod tests {
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
                 coordination_weight: 0.0,
+                consolidation_weight: 0.0,
             },
             script_type: ScriptType::P2tr,
         }];
@@ -855,6 +857,7 @@ mod tests {
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
                 coordination_weight: 0.0,
+                consolidation_weight: 0.0,
             },
             script_type: ScriptType::P2tr,
         }];
@@ -867,6 +870,7 @@ mod tests {
             privacy_weight: 2.0,
             payment_obligation_weight: 1.0,
             coordination_weight: 0.0,
+            consolidation_weight: 0.0,
         };
         let alice_strategies = vec![
             create_strategy("UnilateralSpender").unwrap(),
@@ -1067,6 +1071,7 @@ mod tests {
                     privacy_weight: 2.0,
                     payment_obligation_weight: 1.0,
                     coordination_weight: 0.0,
+                    consolidation_weight: 0.0,
                 },
                 script_type,
             }];
@@ -1110,5 +1115,99 @@ mod tests {
 
             assert_eq!(spend_tx.with(&sim).info().weight, expected_weight);
         }
+    }
+
+    #[test]
+    fn test_consolidation_strategy_pays_and_consolidates() {
+        use crate::config::{ScorerConfig, WalletTypeConfig};
+
+        let wallet_types = vec![
+            WalletTypeConfig {
+                name: "consolidator".to_string(),
+                count: 1,
+                strategies: vec!["Consolidator".to_string()],
+                scorer: ScorerConfig {
+                    fee_savings_weight: 0.0,
+                    privacy_weight: 0.0,
+                    payment_obligation_weight: 1.0,
+                    coordination_weight: 0.0,
+                    consolidation_weight: 1000.0,
+                },
+                script_type: ScriptType::P2tr,
+            },
+            WalletTypeConfig {
+                name: "receiver".to_string(),
+                count: 1,
+                strategies: vec!["UnilateralSpender".to_string()],
+                scorer: ScorerConfig {
+                    fee_savings_weight: 0.0,
+                    privacy_weight: 0.0,
+                    payment_obligation_weight: 1.0,
+                    coordination_weight: 0.0,
+                    consolidation_weight: 0.0,
+                },
+                script_type: ScriptType::P2tr,
+            },
+        ];
+
+        let mut sim = SimulationBuilder::new(42, wallet_types, 8, 1, 4).build();
+        sim.build_universe();
+        sim.run();
+
+        let consolidator = WalletId(0).with(&sim);
+
+        assert!(
+            !consolidator.info().payment_obligations.is_empty(),
+            "Consolidator should have payment obligations"
+        );
+        assert!(
+            !consolidator.info().handled_payment_obligations.is_empty(),
+            "Consolidator should handle payment obligations"
+        );
+
+        let payment_receiver = consolidator
+            .info()
+            .payment_obligations
+            .iter()
+            .next()
+            .map(|po_id| po_id.with(&sim).data().to)
+            .expect("Consolidator should have a payment receiver");
+
+        let mut saw_consolidation = false;
+        for txid in consolidator.data().own_transactions.iter() {
+            let tx = txid.with(&sim);
+            if tx.data().inputs.len() <= 1 {
+                continue;
+            }
+            if tx.data().outputs.len() != 2 {
+                continue;
+            }
+            if !consolidator
+                .info()
+                .txid_to_payment_obligation_ids
+                .contains_key(txid)
+            {
+                continue;
+            }
+            let output_wallets: Vec<_> = tx
+                .data()
+                .outputs
+                .iter()
+                .map(|output| output.address_id.with(&sim).data().wallet_id)
+                .collect();
+            if !output_wallets.contains(&consolidator.id) {
+                continue;
+            }
+            if !output_wallets.contains(&payment_receiver) {
+                continue;
+            }
+            saw_consolidation = true;
+            break;
+        }
+
+        assert!(
+            saw_consolidation,
+            "Consolidator should broadcast a self-consolidation transaction"
+        );
     }
 }
