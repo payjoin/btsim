@@ -10,6 +10,7 @@ use rand_distr::Distribution;
 use rand_distr::Geometric;
 use rand_pcg::rand_core::{RngCore, SeedableRng};
 use rand_pcg::Pcg64;
+use serde::Serialize;
 
 use crate::bulletin_board::BroadcastMessageType;
 use crate::bulletin_board::BulletinBoardData;
@@ -726,6 +727,26 @@ pub struct WalletUtxoStats {
     pub p90: Option<Amount>,
 }
 
+#[derive(Serialize)]
+struct SimulationResultJson {
+    total_payment_obligations: usize,
+    percentage_payment_obligations_missed: f64,
+    total_block_weight_wu: u64,
+    average_fee_cost_sats: u64,
+    dust_utxo_count: usize,
+    utxo_size_distribution_sats: Vec<u64>,
+    wallet_utxo_stats: Vec<WalletUtxoStatsJson>,
+}
+
+#[derive(Serialize)]
+struct WalletUtxoStatsJson {
+    wallet_id: usize,
+    dust_count: usize,
+    total_count: usize,
+    p50_sats: Option<u64>,
+    p90_sats: Option<u64>,
+}
+
 impl SimulationResult {
     pub fn new(sim: &Simulation) -> Self {
         Self {
@@ -873,7 +894,38 @@ impl SimulationResult {
         .unwrap();
         std::fs::write(path, graph_svg).unwrap();
     }
-    // TODO: utxo fragmentation, anon set metrics
+
+    /// Save simulation results as a JSON file.
+    pub fn save_results_json(&self, path: impl AsRef<Path>) {
+        let utxo_sizes = self
+            .utxo_size_distribution()
+            .into_iter()
+            .map(|amount| amount.to_sat())
+            .collect();
+        let wallet_utxo_stats = self
+            .wallet_utxo_stats()
+            .into_iter()
+            .map(|stats| WalletUtxoStatsJson {
+                wallet_id: stats.wallet_id,
+                dust_count: stats.dust_count,
+                total_count: stats.total_count,
+                p50_sats: stats.p50.map(|amount| amount.to_sat()),
+                p90_sats: stats.p90.map(|amount| amount.to_sat()),
+            })
+            .collect();
+        let result = SimulationResultJson {
+            total_payment_obligations: self.total_payment_obligations(),
+            percentage_payment_obligations_missed: self.percentage_of_payment_obligations_missed(),
+            total_block_weight_wu: self.total_block_weight(),
+            average_fee_cost_sats: self.average_fee_cost().to_sat(),
+            dust_utxo_count: self.dust_utxo_count(),
+            utxo_size_distribution_sats: utxo_sizes,
+            wallet_utxo_stats,
+        };
+        let file = std::fs::File::create(path).unwrap();
+        serde_json::to_writer_pretty(file, &result).unwrap();
+    }
+    // TODO: anon set metrics
 }
 
 fn percentile_amount(sorted: &[Amount], percentile: f64) -> Option<Amount> {
