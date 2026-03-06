@@ -34,4 +34,8 @@ fn main() {
         "Total block weight used (wu): {}",
         result.total_block_weight()
     );
+    println!(
+        "Average fee cost (sats): {}",
+        result.average_fee_cost().to_sat()
+    );
 }

@@ -775,6 +775,23 @@ impl SimulationResult {
         self.block_weights().iter().sum::<u64>()
     }
 
+    /// Average fee cost across non-coinbase transactions, computed from current sim state.
+    pub fn average_fee_cost(&self) -> Amount {
+        let mut total_fee_sat = 0u64;
+        let mut counted = 0u64;
+        for (tx, info) in self.sim.tx_data.iter().zip(self.sim.tx_info.iter()) {
+            if tx.inputs.is_empty() {
+                continue;
+            }
+            total_fee_sat = total_fee_sat.saturating_add(info.fee.to_sat());
+            counted = counted.saturating_add(1);
+        }
+        if counted == 0 {
+            return Amount::from_sat(0);
+        }
+        Amount::from_sat(total_fee_sat / counted)
+    }
+
     /// Save the transaction graph to a file.
     pub fn save_tx_graph(&self, path: impl AsRef<Path>) {
         let graph_svg = graphviz_rust::exec(
