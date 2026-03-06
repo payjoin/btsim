@@ -48,7 +48,7 @@ pub(crate) struct Outpoint {
 }
 
 impl<'a> Outpoint {
-    fn with(&self, sim: &'a Simulation) -> OutputHandle<'a> {
+    pub(crate) fn with(&self, sim: &'a Simulation) -> OutputHandle<'a> {
         OutputHandle {
             sim,
             outpoint: *self,

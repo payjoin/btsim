@@ -718,6 +718,14 @@ pub struct SimulationResult {
     sim: Simulation,
 }
 
+pub struct WalletUtxoStats {
+    pub wallet_id: usize,
+    pub dust_count: usize,
+    pub total_count: usize,
+    pub p50: Option<Amount>,
+    pub p90: Option<Amount>,
+}
+
 impl SimulationResult {
     pub fn new(sim: &Simulation) -> Self {
         Self {
@@ -793,6 +801,68 @@ impl SimulationResult {
         Amount::from_sat(total_fee_sat / counted)
     }
 
+    /// Count of dust UTXOs (<= 546 sats), computed from confirmed UTXOs.
+    pub fn dust_utxo_count(&self) -> usize {
+        const DUST_THRESHOLD_SATS: u64 = 546;
+        self.sim
+            .wallet_data
+            .iter()
+            .flat_map(|wallet| {
+                let info = &self.sim.wallet_info[wallet.last_wallet_info_id.0];
+                info.confirmed_utxos.iter()
+            })
+            .filter(|outpoint| {
+                outpoint.with(&self.sim).data().amount.to_sat() <= DUST_THRESHOLD_SATS
+            })
+            .count()
+    }
+
+    /// Sorted list of confirmed UTXO sizes, computed from current sim state.
+    pub fn utxo_size_distribution(&self) -> Vec<Amount> {
+        let mut amounts: Vec<Amount> = self
+            .sim
+            .wallet_data
+            .iter()
+            .flat_map(|wallet| {
+                let info = &self.sim.wallet_info[wallet.last_wallet_info_id.0];
+                info.confirmed_utxos.iter()
+            })
+            .map(|outpoint| outpoint.with(&self.sim).data().amount)
+            .collect();
+        amounts.sort_by_key(|amount| amount.to_sat());
+        amounts
+    }
+
+    /// Per-wallet dust counts and size percentiles (p50, p90) for confirmed UTXOs.
+    pub fn wallet_utxo_stats(&self) -> Vec<WalletUtxoStats> {
+        const DUST_THRESHOLD_SATS: u64 = 546;
+        self.sim
+            .wallet_data
+            .iter()
+            .map(|wallet| {
+                let info = &self.sim.wallet_info[wallet.last_wallet_info_id.0];
+                let mut amounts: Vec<Amount> = info
+                    .confirmed_utxos
+                    .iter()
+                    .map(|outpoint| outpoint.with(&self.sim).data().amount)
+                    .collect();
+                amounts.sort_by_key(|amount| amount.to_sat());
+                let dust_count = amounts
+                    .iter()
+                    .filter(|amount| amount.to_sat() <= DUST_THRESHOLD_SATS)
+                    .count();
+                let total_count = amounts.len();
+                WalletUtxoStats {
+                    wallet_id: wallet.id.0,
+                    dust_count,
+                    total_count,
+                    p50: percentile_amount(&amounts, 0.50),
+                    p90: percentile_amount(&amounts, 0.90),
+                }
+            })
+            .collect()
+    }
+
     /// Save the transaction graph to a file.
     pub fn save_tx_graph(&self, path: impl AsRef<Path>) {
         let graph_svg = graphviz_rust::exec(
@@ -804,6 +874,16 @@ impl SimulationResult {
         std::fs::write(path, graph_svg).unwrap();
     }
     // TODO: utxo fragmentation, anon set metrics
+}
+
+fn percentile_amount(sorted: &[Amount], percentile: f64) -> Option<Amount> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let n = sorted.len() as f64;
+    let rank = (percentile * n).ceil().max(1.0);
+    let idx = (rank as usize).saturating_sub(1);
+    sorted.get(idx).copied()
 }
 
 #[cfg(test)]
