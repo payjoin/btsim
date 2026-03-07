@@ -1,5 +1,5 @@
 use crate::{
-    actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
+    actions::{Action, CompositeScorer, CompositeStrategy, Strategy, WalletView},
     blocks::BroadcastSetId,
     bulletin_board::{BroadcastMessageType, BulletinBoardId},
     message::{MessageId, MessageType, PayjoinProposal},
@@ -63,6 +63,10 @@ define_entity_info!(Wallet, {
     }
 );
 
+/// Fraction of total deadline time remaining below which payment anxiety triggers.
+/// e.g. 10 means unlock in the last 1/10 (10%) of the deadline total time.
+const PAYMENT_ANXIETY_THRESHOLD: u64 = 10;
+
 impl<'a> WalletHandle<'a> {
     pub(crate) fn data(&self) -> &'a WalletData {
         &self.sim.wallet_data[self.id.0]
@@ -75,7 +79,8 @@ impl<'a> WalletHandle<'a> {
     // TODO: this should take into account liabilties spending unconfirmed UTXOs. For which a CPFP cost model is needed
     // In the future in needs to take as arg the current mempool and somethign to predict the state of the mempool overtime
     pub(crate) fn effective_balance(&self) -> Amount {
-        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins().collect();
+        let locked = OrdSet::new();
+        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins(&locked).collect();
         let outputs_amounts = utxos.iter().map(|output| output.data().amount).sum();
 
         outputs_amounts
@@ -87,10 +92,11 @@ impl<'a> WalletHandle<'a> {
         &self,
         target: Target,
         long_term_feerate: bitcoin::FeeRate,
+        locked_inputs: &OrdSet<Outpoint>,
     ) -> (impl Iterator<Item = OutputHandle<'a>>, Drain) {
         // TODO change
         // TODO group by address
-        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins().collect();
+        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins(locked_inputs).collect();
 
         let candidates: Vec<Candidate> = utxos
             .iter()
@@ -155,16 +161,90 @@ impl<'a> WalletHandle<'a> {
             .map(|outpoint| OutputHandle::new(self.sim, *outpoint))
     }
 
-    fn unspent_coins(&self) -> impl Iterator<Item = OutputHandle<'a>> + '_ {
-        self.potentially_spendable_txos().filter(|o| {
-            !self.info().unconfirmed_spends.contains(&o.outpoint())
-            // TODO Startegies should inform which inputs can be spendable.
-            // TODO: these inputs should unlock if the payjoin is expired or the associated payment obligation is due soon (i.e payment anxiety)
-            && !self
-                .info()
-                .unconfirmed_txos_in_payjoins
-                .contains_key(&o.outpoint())
+    fn unspent_coins<'s>(
+        &'s self,
+        locked_inputs: &'s OrdSet<Outpoint>,
+    ) -> impl Iterator<Item = OutputHandle<'a>> + 's {
+        let info = self.info();
+        self.potentially_spendable_txos().filter(move |o| {
+            !info.unconfirmed_spends.contains(&o.outpoint())
+                && !locked_inputs.contains(&o.outpoint())
         })
+    }
+
+    fn is_payment_due_soon(&self, po_id: &PaymentObligationId) -> bool {
+        let po = po_id.with(self.sim).data();
+        let time_to_deadline = po.deadline.0.saturating_sub(self.sim.current_timestep.0);
+        let anxiety_window =
+            (po.deadline.0.saturating_sub(po.reveal_time.0) / PAYMENT_ANXIETY_THRESHOLD).max(1);
+        time_to_deadline <= anxiety_window
+    }
+
+    /// Check if an input is locked by an active (non-expired) payjoin.
+    /// Inputs unlock early if the associated payment obligation deadline is approaching (payment anxiety).
+    fn is_input_locked_by_active_payjoin(&self, outpoint: &Outpoint) -> bool {
+        let bulletin_board_id = match self.info().unconfirmed_txos_in_payjoins.get(outpoint) {
+            Some(id) => *id,
+            None => return false,
+        };
+
+        // Look up the payjoin proposal on the bulletin board
+        let bulletin_board = &self.sim.bulletin_boards[bulletin_board_id.0];
+        if let Some(BroadcastMessageType::InitiatePayjoin(proposal)) = bulletin_board
+            .messages
+            .iter()
+            .find(|m| matches!(m, BroadcastMessageType::InitiatePayjoin(_)))
+        {
+            // Input is locked only if the payjoin is still valid
+            let payjoin_expired = self.sim.current_timestep >= proposal.valid_till;
+            if payjoin_expired {
+                return false;
+            }
+
+            // Check for payment anxiety: unlock if the payment deadline is approaching.
+            // "Due soon" = within the last 10% of the total time to deadline.
+            let po_id = self
+                .find_payment_obligation_for_payjoin(&bulletin_board_id)
+                .expect("payjoin board must be indexed in initiated_payjoins or received_payjoins");
+            if self.is_payment_due_soon(&po_id) {
+                return false; // Unlock due to payment anxiety
+            }
+            return true; // Still locked
+        }
+        // Multi-party payjoin: locked while session is in progress.
+        if let Some(session) = self
+            .info()
+            .active_multi_party_payjoins
+            .get(&bulletin_board_id)
+        {
+            if matches!(session.state, TxConstructionState::Success(_)) {
+                return false;
+            }
+            let due_soon = session
+                .payment_obligation_ids
+                .iter()
+                .any(|po_id| self.is_payment_due_soon(po_id));
+            return !due_soon;
+        }
+        false
+    }
+
+    /// Find the payment obligation associated with a payjoin bulletin board.
+    fn find_payment_obligation_for_payjoin(
+        &self,
+        bulletin_board_id: &BulletinBoardId,
+    ) -> Option<PaymentObligationId> {
+        for (po_id, bb_id) in self.info().initiated_payjoins.iter() {
+            if bb_id == bulletin_board_id {
+                return Some(*po_id);
+            }
+        }
+        for (po_id, bb_id) in self.info().received_payjoins.iter() {
+            if bb_id == bulletin_board_id {
+                return Some(*po_id);
+            }
+        }
+        None
     }
 
     fn double_spendable_coins(&self) -> impl Iterator<Item = OutputHandle<'a>> + '_ {
@@ -181,6 +261,24 @@ impl<'a> WalletHandleMut<'a> {
     fn info_mut<'b>(&'b mut self) -> &'b mut WalletInfo {
         let last_wallet_info_id = self.data().last_wallet_info_id;
         &mut self.sim.wallet_info[last_wallet_info_id.0]
+    }
+
+    fn protocol_locked_inputs(&self) -> OrdSet<Outpoint> {
+        self.info()
+            .unconfirmed_txos_in_payjoins
+            .keys()
+            .filter(|op| self.is_input_locked_by_active_payjoin(op))
+            .cloned()
+            .collect()
+    }
+
+    fn coin_selection_locked_inputs(&self, wallet_view: &WalletView) -> OrdSet<Outpoint> {
+        self.data()
+            .strategies
+            .locked_inputs(wallet_view)
+            .into_iter()
+            .chain(self.protocol_locked_inputs().into_iter())
+            .collect()
     }
 
     pub(crate) fn handle(&self) -> WalletHandle {
@@ -241,7 +339,12 @@ impl<'a> WalletHandleMut<'a> {
         };
         let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).expect("valid fee rate");
 
-        let (selected_coins, drain) = self.handle().select_coins(target, long_term_feerate);
+        let wallet_view = self.wallet_view();
+        let locked_inputs = self.coin_selection_locked_inputs(&wallet_view);
+
+        let (selected_coins, drain) =
+            self.handle()
+                .select_coins(target, long_term_feerate, &locked_inputs);
         let mut tx = TxData::default();
         let mut outputs = vec![];
         for (amount, address_id) in amount_and_destination.iter() {
@@ -354,6 +457,12 @@ impl<'a> WalletHandleMut<'a> {
         }
         let change_addr = self.new_address();
         let tx_template = self.construct_transaction_template(po_ids, &change_addr);
+        // Lock inputs to this multi-party payjoin session.
+        for input in tx_template.inputs.iter() {
+            self.info_mut()
+                .unconfirmed_txos_in_payjoins
+                .insert(input.outpoint, bulletin_board_id);
+        }
         let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
 
         session.send_inputs();
@@ -595,6 +704,12 @@ impl<'a> WalletHandleMut<'a> {
                 let change_addr = self.new_address();
                 let tx_template =
                     self.construct_transaction_template(&[*payment_obligation_id], &change_addr);
+                // Lock inputs to this multi-party payjoin session.
+                for input in tx_template.inputs.iter() {
+                    self.info_mut()
+                        .unconfirmed_txos_in_payjoins
+                        .insert(input.outpoint, *bulletin_board_id);
+                }
                 self.info_mut().active_multi_party_payjoins.insert(
                     *bulletin_board_id,
                     MultiPartyPayjoinSession {
@@ -737,5 +852,220 @@ impl<'a> AddressHandle<'a> {
 
     pub(crate) fn wallet(&self) -> WalletHandle<'a> {
         self.data().wallet_id.with(self.sim)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        bulletin_board::BroadcastMessageType, message::PayjoinProposal, SimulationBuilder,
+    };
+
+    fn create_test_sim() -> Simulation {
+        use crate::config::{ScorerConfig, WalletTypeConfig};
+        SimulationBuilder::new(
+            42,
+            vec![WalletTypeConfig {
+                name: "test".to_string(),
+                count: 2,
+                strategies: vec!["UnilateralSpender".to_string()],
+                scorer: ScorerConfig {
+                    initiate_payjoin_utility_factor: 1.0,
+                    respond_to_payjoin_utility_factor: 1.0,
+                    payment_obligation_utility_factor: 1.0,
+                    multi_party_payjoin_utility_factor: 0.0,
+                },
+            }],
+            100,
+            1,
+            0,
+        )
+        .build()
+    }
+    #[test]
+    fn test_payjoin_locking() {
+        let mut sim = create_test_sim();
+        let outpoint = Outpoint {
+            txid: TxId(999),
+            index: 0,
+        };
+        // Create a dummy PO with a deadline well beyond valid_till
+        let po_id = PaymentObligationId(sim.payment_data.len());
+        sim.payment_data.push(PaymentObligationData {
+            id: po_id,
+            amount: Amount::from_sat(100_000),
+            from: WalletId(0),
+            to: WalletId(1),
+            deadline: TimeStep(1000),
+            reveal_time: TimeStep(0),
+        });
+        let bb_id = sim.create_bulletin_board();
+        sim.add_message_to_bulletin_board(
+            bb_id,
+            BroadcastMessageType::InitiatePayjoin(PayjoinProposal {
+                tx: TxData::default(),
+                valid_till: TimeStep(50),
+            }),
+        );
+        {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.info_mut()
+                .unconfirmed_txos_in_payjoins
+                .insert(outpoint, bb_id);
+            // Index the board in initiated_payjoins mirroring what create_payjoin does.
+            w.info_mut().initiated_payjoins.insert(po_id, bb_id);
+        }
+
+        sim.current_timestep = TimeStep(20);
+        assert!(
+            WalletId(0)
+                .with(&sim)
+                .is_input_locked_by_active_payjoin(&outpoint),
+            "should be locked: payjoin active (now=20 < valid_till=50)"
+        );
+
+        sim.current_timestep = TimeStep(51);
+        assert!(
+            !WalletId(0)
+                .with(&sim)
+                .is_input_locked_by_active_payjoin(&outpoint),
+            "should unlock: payjoin expired (now=51 >= valid_till=50)"
+        );
+
+        // --- Multi-party payjoin lifecycle ---
+        let mp_outpoint = Outpoint {
+            txid: TxId(888),
+            index: 0,
+        };
+        let mp_bb_id = sim.create_bulletin_board();
+        {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.info_mut()
+                .unconfirmed_txos_in_payjoins
+                .insert(mp_outpoint, mp_bb_id);
+            w.info_mut().active_multi_party_payjoins.insert(
+                mp_bb_id,
+                MultiPartyPayjoinSession {
+                    payment_obligation_ids: vec![],
+                    tx_template: TxData::default(),
+                    state: TxConstructionState::SentInputs,
+                },
+            );
+        }
+
+        sim.current_timestep = TimeStep(1);
+        assert!(
+            WalletId(0)
+                .with(&sim)
+                .is_input_locked_by_active_payjoin(&mp_outpoint),
+            "multi-party: should be locked while session is in progress (SentInputs)"
+        );
+
+        // Advance session to Success should unlock
+        WalletId(0)
+            .with_mut(&mut sim)
+            .info_mut()
+            .active_multi_party_payjoins
+            .get_mut(&mp_bb_id)
+            .unwrap()
+            .state = TxConstructionState::Success(TxId(42));
+
+        assert!(
+            !WalletId(0)
+                .with(&sim)
+                .is_input_locked_by_active_payjoin(&mp_outpoint),
+            "multi-party: should unlock once session reaches Success"
+        );
+    }
+
+    #[test]
+    fn test_payment_anxiety() {
+        let mut sim = create_test_sim();
+
+        // Shared payment obligation: deadline=100, anxiety triggers at now=90
+        let po_id = PaymentObligationId(sim.payment_data.len());
+        sim.payment_data.push(PaymentObligationData {
+            id: po_id,
+            amount: Amount::from_sat(100_000),
+            from: WalletId(0),
+            to: WalletId(1),
+            deadline: TimeStep(100),
+            reveal_time: TimeStep(0),
+        });
+
+        // --- 2-party payjoin ---
+        let outpoint = Outpoint {
+            txid: TxId(999),
+            index: 0,
+        };
+        let bb_id = sim.create_bulletin_board();
+        sim.add_message_to_bulletin_board(
+            bb_id,
+            BroadcastMessageType::InitiatePayjoin(PayjoinProposal {
+                tx: TxData::default(),
+                valid_till: TimeStep(200), // far beyond deadline — expiry won't interfere
+            }),
+        );
+        {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.info_mut()
+                .unconfirmed_txos_in_payjoins
+                .insert(outpoint, bb_id);
+            w.info_mut().initiated_payjoins.insert(po_id, bb_id);
+        }
+
+        sim.current_timestep = TimeStep(89);
+        assert!(
+            WalletId(0)
+                .with(&sim)
+                .is_input_locked_by_active_payjoin(&outpoint),
+            "2-party: should be locked because time_to_deadline=11 > threshold=10"
+        );
+
+        sim.current_timestep = TimeStep(90);
+        assert!(
+            !WalletId(0)
+                .with(&sim)
+                .is_input_locked_by_active_payjoin(&outpoint),
+            "2-party: should unlock because time_to_deadline=10 == threshold=10 (boundary)"
+        );
+
+        // --- Multi-party payjoin (same payment obligation, different outpoint) ---
+        let mp_outpoint = Outpoint {
+            txid: TxId(888),
+            index: 0,
+        };
+        let mp_bb_id = sim.create_bulletin_board();
+        {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.info_mut()
+                .unconfirmed_txos_in_payjoins
+                .insert(mp_outpoint, mp_bb_id);
+            w.info_mut().active_multi_party_payjoins.insert(
+                mp_bb_id,
+                MultiPartyPayjoinSession {
+                    payment_obligation_ids: vec![po_id],
+                    tx_template: TxData::default(),
+                    state: TxConstructionState::SentInputs,
+                },
+            );
+        }
+
+        sim.current_timestep = TimeStep(89);
+        assert!(
+            WalletId(0)
+                .with(&sim)
+                .is_input_locked_by_active_payjoin(&mp_outpoint),
+            "multi-party: should be locked because not yet anxious (time_to_deadline=11)"
+        );
+
+        sim.current_timestep = TimeStep(90);
+        assert!(
+            !WalletId(0)
+                .with(&sim)
+                .is_input_locked_by_active_payjoin(&mp_outpoint),
+            "multi-party: should unlock because payment anxiety (time_to_deadline=10 == threshold)"
+        );
     }
 }

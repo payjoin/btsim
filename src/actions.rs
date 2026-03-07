@@ -6,6 +6,7 @@ use log::debug;
 use crate::{
     bulletin_board::BulletinBoardId,
     message::{MessageId, PayjoinProposal},
+    transaction::Outpoint,
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
     Simulation, TimeStep,
 };
@@ -332,6 +333,9 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
 /// TODO: Strategies should be composible. They should enform the action decision space scoring and doing actions should be handling by something else that has composed multiple strategies.
 pub(crate) trait Strategy: std::fmt::Debug {
     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action>;
+    fn locked_inputs(&self, _state: &WalletView) -> Vec<Outpoint> {
+        vec![]
+    }
     fn clone_box(&self) -> Box<dyn Strategy>;
 }
 
@@ -539,6 +543,13 @@ impl Strategy for CompositeStrategy {
             actions.extend(strategy.enumerate_candidate_actions(state));
         }
         actions
+    }
+
+    fn locked_inputs(&self, state: &WalletView) -> Vec<Outpoint> {
+        self.strategies
+            .iter()
+            .flat_map(|s| s.locked_inputs(state))
+            .collect()
     }
 
     fn clone_box(&self) -> Box<dyn Strategy> {
