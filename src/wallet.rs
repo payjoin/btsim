@@ -60,6 +60,8 @@ define_entity_info!(Wallet, {
         pub(crate) handled_payment_obligations: OrdSet<PaymentObligationId>,
         /// Set of multi-party payjoin sessions that this wallet is participating in
         pub(crate) active_multi_party_payjoins: HashMap<BulletinBoardId, MultiPartyPayjoinSession>,
+        /// UTXOs currently committed to interactive protocols (payjoins, multi-party sessions).
+        pub(crate) used_utxos: OrdSet<Outpoint>,
     }
 );
 
@@ -75,7 +77,8 @@ impl<'a> WalletHandle<'a> {
     // TODO: this should take into account liabilties spending unconfirmed UTXOs. For which a CPFP cost model is needed
     // In the future in needs to take as arg the current mempool and somethign to predict the state of the mempool overtime
     pub(crate) fn effective_balance(&self) -> Amount {
-        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins().collect();
+        let locked = OrdSet::new();
+        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins(&locked).collect();
         let outputs_amounts = utxos.iter().map(|output| output.data().amount).sum();
 
         outputs_amounts
@@ -87,10 +90,11 @@ impl<'a> WalletHandle<'a> {
         &self,
         target: Target,
         long_term_feerate: bitcoin::FeeRate,
+        locked_inputs: &OrdSet<Outpoint>,
     ) -> (impl Iterator<Item = OutputHandle<'a>>, Drain) {
         // TODO change
         // TODO group by address
-        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins().collect();
+        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins(locked_inputs).collect();
 
         let candidates: Vec<Candidate> = utxos
             .iter()
@@ -155,15 +159,14 @@ impl<'a> WalletHandle<'a> {
             .map(|outpoint| OutputHandle::new(self.sim, *outpoint))
     }
 
-    fn unspent_coins(&self) -> impl Iterator<Item = OutputHandle<'a>> + '_ {
-        self.potentially_spendable_txos().filter(|o| {
-            !self.info().unconfirmed_spends.contains(&o.outpoint())
-            // TODO Startegies should inform which inputs can be spendable.
-            // TODO: these inputs should unlock if the payjoin is expired or the associated payment obligation is due soon (i.e payment anxiety)
-            && !self
-                .info()
-                .unconfirmed_txos_in_payjoins
-                .contains_key(&o.outpoint())
+    fn unspent_coins<'s>(
+        &'s self,
+        locked_inputs: &'s OrdSet<Outpoint>,
+    ) -> impl Iterator<Item = OutputHandle<'a>> + 's {
+        let info = self.info();
+        self.potentially_spendable_txos().filter(move |o| {
+            !info.unconfirmed_spends.contains(&o.outpoint())
+                && !locked_inputs.contains(&o.outpoint())
         })
     }
 
@@ -241,7 +244,11 @@ impl<'a> WalletHandleMut<'a> {
         };
         let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).expect("valid fee rate");
 
-        let (selected_coins, drain) = self.handle().select_coins(target, long_term_feerate);
+        let locked_inputs = self.info().used_utxos.clone();
+
+        let (selected_coins, drain) =
+            self.handle()
+                .select_coins(target, long_term_feerate, &locked_inputs);
         let mut tx = TxData::default();
         let mut outputs = vec![];
         for (amount, address_id) in amount_and_destination.iter() {
@@ -263,6 +270,76 @@ impl<'a> WalletHandleMut<'a> {
         tx
     }
 
+    fn abandon_payjoin(&mut self, payment_obligation_id: &PaymentObligationId) {
+        // Check initiated payjoins first, then received payjoins
+        let bulletin_board_id = self
+            .info()
+            .initiated_payjoins
+            .get(payment_obligation_id)
+            .or_else(|| self.info().received_payjoins.get(payment_obligation_id))
+            .cloned();
+
+        if let Some(bb_id) = bulletin_board_id {
+            // Remove UTXOs committed to this payjoin from used_utxos
+            let outpoints_to_free: Vec<Outpoint> = self
+                .info()
+                .unconfirmed_txos_in_payjoins
+                .iter()
+                .filter(|(_, bid)| **bid == bb_id)
+                .map(|(outpoint, _)| *outpoint)
+                .collect();
+
+            for outpoint in outpoints_to_free {
+                self.info_mut().used_utxos.remove(&outpoint);
+                self.info_mut()
+                    .unconfirmed_txos_in_payjoins
+                    .remove(&outpoint);
+            }
+
+            // Remove from initiated or received payjoins map
+            self.info_mut()
+                .initiated_payjoins
+                .remove(payment_obligation_id);
+            self.info_mut()
+                .received_payjoins
+                .remove(payment_obligation_id);
+            return;
+        }
+
+        // Check active multi-party payjoin sessions
+        let mp_bb_id = self
+            .info()
+            .active_multi_party_payjoins
+            .iter()
+            .find(|(_, session)| {
+                session
+                    .payment_obligation_ids
+                    .contains(payment_obligation_id)
+            })
+            .map(|(bb_id, _)| *bb_id);
+
+        if let Some(bb_id) = mp_bb_id {
+            // Remove UTXOs committed to this session from used_utxos
+            let outpoints_to_free: Vec<Outpoint> = self
+                .info()
+                .unconfirmed_txos_in_payjoins
+                .iter()
+                .filter(|(_, bid)| **bid == bb_id)
+                .map(|(outpoint, _)| *outpoint)
+                .collect();
+
+            for outpoint in outpoints_to_free {
+                self.info_mut().used_utxos.remove(&outpoint);
+                self.info_mut()
+                    .unconfirmed_txos_in_payjoins
+                    .remove(&outpoint);
+            }
+
+            // Remove the entire multi-party session
+            self.info_mut().active_multi_party_payjoins.remove(&bb_id);
+        }
+    }
+
     fn participate_in_payjoin(
         &mut self,
         message_id: &MessageId,
@@ -274,11 +351,12 @@ impl<'a> WalletHandleMut<'a> {
         let change_addr = self.new_address();
         let mut tx_template =
             self.construct_transaction_template(&[*payment_obligation_id], &change_addr);
-        // "Lock" The inputs to this payjoin. These inputs can be spent if the payjoin is expired and our payment is due soon
+        // Mark UTXOs as used in this payjoin
         for input in tx_template.inputs.iter() {
             self.info_mut()
                 .unconfirmed_txos_in_payjoins
                 .insert(input.outpoint, *bulletin_board_id);
+            self.info_mut().used_utxos.insert(input.outpoint);
         }
 
         self.ack_transaction(&mut tx_template);
@@ -319,12 +397,13 @@ impl<'a> WalletHandleMut<'a> {
             tx: tx_template,
             valid_till: payment_obligation_data.deadline,
         };
-        // "Lock" The inputs to this cospend. These inputs can be spent if the cospend is expired and our payment is due soon
+        // Mark UTXOs as used in this cospend
         let bulletin_board_id = self.sim.create_bulletin_board();
         for input in payjoin_proposal.tx.inputs.iter() {
             self.info_mut()
                 .unconfirmed_txos_in_payjoins
                 .insert(input.outpoint, bulletin_board_id);
+            self.info_mut().used_utxos.insert(input.outpoint);
         }
         self.info_mut()
             .initiated_payjoins
@@ -354,6 +433,13 @@ impl<'a> WalletHandleMut<'a> {
         }
         let change_addr = self.new_address();
         let tx_template = self.construct_transaction_template(po_ids, &change_addr);
+        // Mark UTXOs as used in this multi-party payjoin session.
+        for input in tx_template.inputs.iter() {
+            self.info_mut()
+                .unconfirmed_txos_in_payjoins
+                .insert(input.outpoint, bulletin_board_id);
+            self.info_mut().used_utxos.insert(input.outpoint);
+        }
         let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
 
         session.send_inputs();
@@ -526,9 +612,10 @@ impl<'a> WalletHandleMut<'a> {
             })
             .collect::<Vec<_>>();
 
-        // Filter out payment obligations that are already handled, or have an initiated/received payjoin
-        // TODO: in the future where we want to support fallbacks we should not filter out initiated payjoins
-        // Rather they are considered a seperate action.
+        // Filter out payment obligations that are already handled, or have an initiated/received payjoin.
+        // The scorer evaluates all UTXOs (including used ones) by clearing used_utxos
+        // in the simulation clone, so even UTXOs committed to payjoins can be picked for
+        // more valuable actions when scoring.
         let initiated_po_ids: OrdSet<PaymentObligationId> =
             wallet_info.initiated_payjoins.keys().cloned().collect();
         let received_po_ids: OrdSet<PaymentObligationId> =
@@ -546,14 +633,36 @@ impl<'a> WalletHandleMut<'a> {
             .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
             .map(|po| po.with(self.sim).data().clone())
             .collect::<Vec<_>>();
+
+        // POs currently in pending payjoins candidates for AbandonPayjoin
+        let multi_party_po_ids: OrdSet<PaymentObligationId> = wallet_info
+            .active_multi_party_payjoins
+            .values()
+            .flat_map(|session| session.payment_obligation_ids.iter().cloned())
+            .collect();
+
+        let payjoin_pending_pos = wallet_info
+            .payment_obligations
+            .iter()
+            .filter(|po_id| {
+                !wallet_info.handled_payment_obligations.contains(po_id)
+                    && (initiated_po_ids.contains(po_id)
+                        || received_po_ids.contains(po_id)
+                        || multi_party_po_ids.contains(po_id))
+            })
+            .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
+            .map(|po| po.with(self.sim).data().clone())
+            .collect::<Vec<_>>();
+
         WalletView::new(
             payment_obligations,
             payjoin_proposals,
             new_multi_party_payjoins,
             active_mp_pj_sessions,
             self.sim.current_timestep,
-            // TODO active mp pj sessions
             self.id,
+            wallet_info.used_utxos.clone(),
+            payjoin_pending_pos,
         )
     }
 
@@ -595,6 +704,13 @@ impl<'a> WalletHandleMut<'a> {
                 let change_addr = self.new_address();
                 let tx_template =
                     self.construct_transaction_template(&[*payment_obligation_id], &change_addr);
+                // Mark UTXOs as used in this multi-party payjoin session.
+                for input in tx_template.inputs.iter() {
+                    self.info_mut()
+                        .unconfirmed_txos_in_payjoins
+                        .insert(input.outpoint, *bulletin_board_id);
+                    self.info_mut().used_utxos.insert(input.outpoint);
+                }
                 self.info_mut().active_multi_party_payjoins.insert(
                     *bulletin_board_id,
                     MultiPartyPayjoinSession {
@@ -610,6 +726,9 @@ impl<'a> WalletHandleMut<'a> {
             }
             Action::ContinueParticipateMultiPartyPayjoin(bulletin_board_id) => {
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
+            }
+            Action::AbandonPayjoin(po_id) => {
+                self.abandon_payjoin(po_id);
             }
         }
     }
@@ -737,5 +856,170 @@ impl<'a> AddressHandle<'a> {
 
     pub(crate) fn wallet(&self) -> WalletHandle<'a> {
         self.data().wallet_id.with(self.sim)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SimulationBuilder;
+
+    fn create_test_sim() -> Simulation {
+        use crate::config::{ScorerConfig, WalletTypeConfig};
+        SimulationBuilder::new(
+            42,
+            vec![WalletTypeConfig {
+                name: "test".to_string(),
+                count: 2,
+                strategies: vec!["UnilateralSpender".to_string()],
+                scorer: ScorerConfig {
+                    initiate_payjoin_utility_factor: 1.0,
+                    respond_to_payjoin_utility_factor: 1.0,
+                    payment_obligation_utility_factor: 1.0,
+                    multi_party_payjoin_utility_factor: 0.0,
+                },
+            }],
+            100,
+            1,
+            0,
+        )
+        .build()
+    }
+
+    #[test]
+    fn test_used_utxos_populated_on_payjoin() {
+        let mut sim = create_test_sim();
+        sim.build_universe();
+
+        // Create a payment obligation from wallet 0 to wallet 1
+        let po_id = PaymentObligationId(sim.payment_data.len());
+        sim.payment_data.push(PaymentObligationData {
+            id: po_id,
+            amount: Amount::from_sat(100_000),
+            from: WalletId(0),
+            to: WalletId(1),
+            deadline: TimeStep(50),
+            reveal_time: TimeStep(0),
+        });
+        {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.info_mut().payment_obligations.insert(po_id);
+        }
+
+        // Before creating a payjoin, used_utxos should be empty
+        assert!(
+            WalletId(0).with(&sim).info().used_utxos.is_empty(),
+            "used_utxos should start empty"
+        );
+
+        // Create a payjoin — this should populate used_utxos
+        let bb_id = {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.create_payjoin(&po_id)
+        };
+
+        let info = WalletId(0).with(&sim).info();
+        assert!(
+            !info.used_utxos.is_empty(),
+            "used_utxos should be populated after creating a payjoin"
+        );
+        // Every input committed to the payjoin should be in used_utxos
+        for (outpoint, _) in info.unconfirmed_txos_in_payjoins.iter() {
+            assert!(
+                info.used_utxos.contains(outpoint),
+                "outpoint {:?} should be in used_utxos",
+                outpoint
+            );
+        }
+    }
+
+    #[test]
+    fn test_coin_selection_excludes_used_utxos() {
+        let mut sim = create_test_sim();
+        sim.build_universe();
+
+        // Mark all confirmed utxos as used
+        let all_utxos: Vec<Outpoint> = WalletId(0)
+            .with(&sim)
+            .info()
+            .confirmed_utxos
+            .iter()
+            .cloned()
+            .collect();
+        assert!(!all_utxos.is_empty(), "wallet should have UTXOs");
+
+        let locked: OrdSet<Outpoint> = all_utxos.iter().cloned().collect();
+
+        // With all UTXOs locked, unspent_coins should return nothing
+        let available: Vec<_> = WalletId(0).with(&sim).unspent_coins(&locked).collect();
+        assert!(
+            available.is_empty(),
+            "no coins should be available when all are locked"
+        );
+
+        // With empty lock set, all should be available
+        let empty = OrdSet::new();
+        let available: Vec<_> = WalletId(0).with(&sim).unspent_coins(&empty).collect();
+        assert!(
+            !available.is_empty(),
+            "all coins should be available with empty lock set"
+        );
+    }
+
+    #[test]
+    fn test_abandon_payjoin_frees_utxos() {
+        let mut sim = create_test_sim();
+        sim.build_universe();
+
+        // Create a payment obligation
+        let po_id = PaymentObligationId(sim.payment_data.len());
+        sim.payment_data.push(PaymentObligationData {
+            id: po_id,
+            amount: Amount::from_sat(100_000),
+            from: WalletId(0),
+            to: WalletId(1),
+            deadline: TimeStep(50),
+            reveal_time: TimeStep(0),
+        });
+        {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.info_mut().payment_obligations.insert(po_id);
+        }
+
+        // Create a payjoin commits UTXOs
+        let _bb_id = {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.create_payjoin(&po_id)
+        };
+
+        // Verify UTXOs are locked
+        let used_before: Vec<Outpoint> = WalletId(0)
+            .with(&sim)
+            .info()
+            .used_utxos
+            .iter()
+            .cloned()
+            .collect();
+        assert!(
+            !used_before.is_empty(),
+            "UTXOs should be locked after payjoin"
+        );
+
+        // Abandon the payjoin
+        {
+            let mut w = WalletId(0).with_mut(&mut sim);
+            w.abandon_payjoin(&po_id);
+        }
+
+        // Verify UTXOs are freed
+        let info = WalletId(0).with(&sim).info();
+        assert!(
+            info.used_utxos.is_empty(),
+            "used_utxos should be empty after abandoning payjoin"
+        );
+        assert!(
+            !info.initiated_payjoins.contains_key(&po_id),
+            "initiated_payjoins should not contain the abandoned PO"
+        );
     }
 }

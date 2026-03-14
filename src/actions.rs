@@ -6,6 +6,7 @@ use log::debug;
 use crate::{
     bulletin_board::BulletinBoardId,
     message::{MessageId, PayjoinProposal},
+    transaction::Outpoint,
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
     Simulation, TimeStep,
 };
@@ -58,6 +59,8 @@ pub(crate) enum Action {
     ParticipateMultiPartyPayjoin((MessageId, BulletinBoardId, PaymentObligationId)),
     /// Continue to participate in a multi-party payjoin
     ContinueParticipateMultiPartyPayjoin(BulletinBoardId),
+    /// Abandon a pending payjoin, freeing the committed UTXOs and the payment obligation
+    AbandonPayjoin(PaymentObligationId),
     /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
     Wait,
 }
@@ -70,6 +73,7 @@ pub(crate) enum PredictedOutcome {
     RespondToPayjoin(RespondToPayjoinOutcome),
     InitiateMultiPartyPayjoin(InitiateMultiPartyPayjoinOutcome),
     ParticipateMultiPartyPayjoin(ParticipateMultiPartyPayjoinOutcome),
+    AbandonPayjoin(AbandonPayjoinOutcome),
 }
 
 #[derive(Debug)]
@@ -193,6 +197,28 @@ impl ParticipateMultiPartyPayjoinOutcome {
     }
 }
 
+/// Score of abandoning a pending payjoin.
+#[derive(Debug)]
+pub(crate) struct AbandonPayjoinOutcome {
+    time_left: i32,
+    amount_freed: f64,
+}
+
+impl AbandonPayjoinOutcome {
+    fn score(&self, payment_obligation_utility_factor: f64) -> ActionScore {
+        // Same urgency curve as PaymentObligationHandledOutcome:
+        let points = [
+            (0.0, 2.0 * payment_obligation_utility_factor),
+            (2.0, payment_obligation_utility_factor),
+            (5.0, 0.0),
+        ];
+        let utility = piecewise_linear(self.time_left as f64, &points);
+        let score = self.amount_freed * utility;
+        debug!("AbandonPayjoinOutcome score: {:?}", score);
+        ActionScore(score)
+    }
+}
+
 /// State of the wallet that can be used to potential enumerate actions
 #[derive(Debug)]
 pub(crate) struct WalletView {
@@ -203,6 +229,9 @@ pub(crate) struct WalletView {
     current_timestep: TimeStep,
     wallet_id: WalletId,
     // TODO: utxos, feerate, cospend oppurtunities, etc.
+    pub(crate) used_utxos: im::OrdSet<Outpoint>,
+    /// Payment obligations currently in pending payjoins (candidates for AbandonPayjoin)
+    pub(crate) payjoin_pending_pos: Vec<PaymentObligationData>,
 }
 
 impl WalletView {
@@ -213,6 +242,8 @@ impl WalletView {
         active_multi_party_payjoins: Vec<BulletinBoardId>,
         current_timestep: TimeStep,
         wallet_id: WalletId,
+        used_utxos: im::OrdSet<Outpoint>,
+        payjoin_pending_pos: Vec<PaymentObligationData>,
     ) -> Self {
         Self {
             payment_obligations,
@@ -221,6 +252,8 @@ impl WalletView {
             new_multi_party_payjoins,
             current_timestep,
             wallet_id,
+            used_utxos,
+            payjoin_pending_pos,
         }
     }
 }
@@ -245,13 +278,28 @@ fn get_payment_obligation_handled_outcome(
 }
 
 fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<PredictedOutcome> {
+    if let Action::AbandonPayjoin(po_id) = action {
+        let po = po_id.with(&wallet_handle.sim).data();
+        let current_timestep = wallet_handle.sim.current_timestep;
+        let time_left = po.deadline.0 as i32 - current_timestep.0 as i32;
+        let amount_freed = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
+        return vec![PredictedOutcome::AbandonPayjoin(AbandonPayjoinOutcome {
+            time_left,
+            amount_freed,
+        })];
+    }
+
     let wallet_view = wallet_handle.wallet_view();
     let mut events = vec![];
     let old_info = wallet_handle.info().clone();
 
-    // Deep clone the simulation and run the action
+    // Deep clone the simulation and run the action.
+    // Clear used_utxos so scoring evaluates all UTXOs, including ones
+    // committed to pending interactive protocols.
     let wallet_id = wallet_handle.data().id;
     let mut sim = wallet_handle.sim.clone();
+    let info_id = sim.wallet_data[wallet_id.0].last_wallet_info_id.0;
+    sim.wallet_info[info_id].used_utxos.clear();
     let mut new_wallet_handle = wallet_handle.data().id.with_mut(&mut sim);
     new_wallet_handle.do_action(action);
     let new_wallet_handle = wallet_id.with(&sim);
@@ -432,6 +480,11 @@ impl Strategy for PayjoinStrategy {
             }
         }
 
+        // Enumerate abandon candidates for POs currently in pending payjoins
+        for po in state.payjoin_pending_pos.iter() {
+            actions.push(Action::AbandonPayjoin(po.id));
+        }
+
         actions
     }
 
@@ -479,6 +532,11 @@ impl Strategy for MultipartyPayjoinInitiatorStrategy {
             state.payment_obligations.iter().map(|po| po.id).collect(),
         ));
 
+        // Enumerate abandon candidates for POs in pending multi-party payjoins
+        for po in state.payjoin_pending_pos.iter() {
+            actions.push(Action::AbandonPayjoin(po.id));
+        }
+
         actions
     }
 
@@ -519,6 +577,12 @@ impl Strategy for MultipartyPayjoinParticipantStrategy {
                 *bulletin_board_id,
             ));
         }
+
+        // Enumerate abandon candidates for POs in pending multi-party payjoins
+        for po in state.payjoin_pending_pos.iter() {
+            actions.push(Action::AbandonPayjoin(po.id));
+        }
+
         actions
     }
 
@@ -595,6 +659,9 @@ impl CompositeScorer {
                 PredictedOutcome::ParticipateMultiPartyPayjoin(event) => {
                     score = score + event.score(self.coordination_weight);
                 }
+                PredictedOutcome::AbandonPayjoin(event) => {
+                    score = score + event.score(self.payment_obligation_utility_factor);
+                }
             }
         }
         score
@@ -633,6 +700,8 @@ mod tests {
             vec![],
             TimeStep(0),
             WalletId(0),
+            im::OrdSet::new(),
+            vec![],
         )
     }
 
@@ -850,7 +919,6 @@ mod tests {
             to: WalletId(2),
         };
 
-        // Create view with wallet_id = 1 (not 0)
         let view = WalletView::new(
             vec![po],
             vec![],
@@ -858,6 +926,8 @@ mod tests {
             vec![],
             TimeStep(0),
             WalletId(1), // Wallet 1, not 0
+            im::OrdSet::new(),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -880,7 +950,6 @@ mod tests {
             to: WalletId(1),
         };
 
-        // Create view with a new multi-party payjoin invitation
         let view = WalletView::new(
             vec![po],
             vec![],
@@ -888,6 +957,8 @@ mod tests {
             vec![],                                   // No active sessions yet
             TimeStep(0),
             WalletId(1),
+            im::OrdSet::new(),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -911,7 +982,6 @@ mod tests {
             to: WalletId(1),
         };
 
-        // Create view with an active session
         let view = WalletView::new(
             vec![po],
             vec![],
@@ -919,6 +989,8 @@ mod tests {
             vec![BulletinBoardId(0)], // Active session
             TimeStep(0),
             WalletId(1),
+            im::OrdSet::new(),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -942,7 +1014,6 @@ mod tests {
             to: WalletId(1),
         };
 
-        // With both a new invitation and active session, strategy should continue active session.
         let view = WalletView::new(
             vec![po],
             vec![],
@@ -950,6 +1021,8 @@ mod tests {
             vec![BulletinBoardId(1)],
             TimeStep(0),
             WalletId(1),
+            im::OrdSet::new(),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);

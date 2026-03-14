@@ -524,6 +524,7 @@ impl<'a> Simulation {
             handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
             active_multi_party_payjoins:
                 im::HashMap::<BulletinBoardId, MultiPartyPayjoinSession>::default(),
+            used_utxos: OrdSet::<Outpoint>::default(),
         });
 
         let id = WalletId(self.wallet_data.len());
@@ -920,7 +921,11 @@ mod tests {
             .with_mut(&mut sim)
             .new_tx(|tx, sim| {
                 // TODO use select_coins
-                let (inputs, drain) = alice.with(&sim).select_coins(target, long_term_feerate);
+                let locked = OrdSet::new();
+                let (inputs, drain) =
+                    alice
+                        .with(&sim)
+                        .select_coins(target, long_term_feerate, &locked);
 
                 tx.inputs = inputs
                     .map(|o| Input {
