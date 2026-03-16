@@ -281,15 +281,10 @@ impl<'a> WalletHandleMut<'a> {
                 .insert(input.outpoint, *bulletin_board_id);
         }
 
-        self.ack_transaction(&mut tx_template);
         tx_template.inputs.extend(payjoin.tx.inputs.iter().cloned());
         tx_template
             .outputs
             .extend(payjoin.tx.outputs.iter().cloned());
-        tx_template
-            .wallet_acks
-            .extend(payjoin.tx.wallet_acks.iter().cloned());
-        debug_assert!(tx_template.wallet_acks.contains(&self.id));
 
         let tx_id = self.spend_tx(tx_template);
 
@@ -313,8 +308,6 @@ impl<'a> WalletHandleMut<'a> {
         let change_addr = self.new_address();
         let mut tx_template =
             self.construct_transaction_template(&[payment_obligation_data.id], &change_addr);
-        self.ack_transaction(&mut tx_template);
-        debug_assert!(tx_template.wallet_acks.contains(&self.id));
         let payjoin_proposal = PayjoinProposal {
             tx: tx_template,
             valid_till: payment_obligation_data.deadline,
@@ -634,17 +627,11 @@ impl<'a> WalletHandleMut<'a> {
         let change_addr = self.new_address();
         let mut tx_template =
             self.construct_transaction_template(payment_obligation_ids, &change_addr);
-        self.ack_transaction(&mut tx_template);
-
         let tx_id = self.spend_tx(tx_template);
         self.info_mut()
             .txid_to_payment_obligation_ids
             .insert(tx_id, payment_obligation_ids.to_vec());
         self.broadcast(vec![tx_id]);
-    }
-
-    fn ack_transaction(&self, tx: &mut TxData) {
-        tx.wallet_acks.push(self.id);
     }
 
     // TODO: refactor this? Do we event need this?
@@ -654,7 +641,6 @@ impl<'a> WalletHandleMut<'a> {
             .new_tx(|tx, _| {
                 tx.inputs = txdata.inputs;
                 tx.outputs = txdata.outputs;
-                tx.wallet_acks = txdata.wallet_acks;
             })
             .id;
 

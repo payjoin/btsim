@@ -290,11 +290,7 @@ mod tests {
                 });
             }
 
-            TxData {
-                inputs,
-                outputs,
-                wallet_acks: Vec::new(),
-            }
+            TxData { inputs, outputs }
         }
 
         /// Adds input contributions from other participants to the bulletin board

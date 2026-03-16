@@ -713,7 +713,6 @@ mod tests {
             tx: crate::transaction::TxData {
                 inputs: vec![],
                 outputs: vec![],
-                wallet_acks: vec![],
             },
             valid_till: TimeStep(200),
         };
