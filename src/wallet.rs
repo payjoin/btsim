@@ -2,6 +2,7 @@ use crate::{
     actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
     blocks::BroadcastSetId,
     bulletin_board::{BroadcastMessageType, BulletinBoardId},
+    cospend::{generate_candidates, UtxoWithAmount},
     message::{MessageId, MessageType, PayjoinProposal},
     script_type::ScriptType,
     tx_contruction::{
@@ -527,6 +528,15 @@ impl<'a> WalletHandleMut<'a> {
             .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
             .map(|po| po.with(self.sim).data().clone())
             .collect::<Vec<_>>();
+
+        let utxos = self
+            .handle()
+            .unspent_coins()
+            .map(|o| UtxoWithAmount {
+                outpoint: o.outpoint(),
+                amount: o.data().amount,
+            })
+            .collect::<Vec<_>>();
         WalletView::new(
             payment_obligations,
             payjoin_proposals,
@@ -535,7 +545,28 @@ impl<'a> WalletHandleMut<'a> {
             self.sim.current_timestep,
             // TODO active mp pj sessions
             self.id,
+            utxos,
         )
+    }
+
+    pub(crate) fn create_cospend_proposal(&'a mut self, po_ids: &[PaymentObligationId]) {
+        // TODO: change should be decomposed.
+        let change_addr = self.new_address();
+        // TODO: should you try to construct with other utxos than the ones bnb picks out?
+        let tx_template = self.construct_transaction_template(po_ids, &change_addr);
+        let orderbook_utxos = self.sim.get_orderbook_utxos();
+        let candidates = generate_candidates(
+            &orderbook_utxos,
+            &tx_template
+                .inputs
+                .iter()
+                .map(|input| input.outpoint.with(self.sim))
+                .map(|input| UtxoWithAmount {
+                    outpoint: input.outpoint,
+                    amount: input.data().amount,
+                })
+                .collect::<Vec<_>>(),
+        );
     }
 
     pub(crate) fn do_action(&'a mut self, action: &Action) {
@@ -594,6 +625,9 @@ impl<'a> WalletHandleMut<'a> {
             }
             Action::ContinueParticipateMultiPartyPayjoin(bulletin_board_id) => {
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
+            }
+            Action::CreateCospendProposal(po_ids) => {
+                self.create_cospend_proposal(po_ids);
             }
         }
     }

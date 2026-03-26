@@ -51,6 +51,7 @@ impl Config {
             "PayjoinStrategy",
             "MultipartyPayjoinInitiatorStrategy",
             "MultipartyPayjoinParticipantStrategy",
+            "CospendStrategy",
         ];
         for wallet_type in &config.wallet_types {
             for strategy in &wallet_type.strategies {
