@@ -1,9 +1,18 @@
-use crate::{bulletin_board::BulletinBoardId, wallet::WalletId};
+use crate::{bulletin_board::BulletinBoardId, transaction::InputId, wallet::WalletId, TimeStep};
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct UTXORegisteration {
+    pub(crate) input_id: InputId,
+    pub(crate) owner: WalletId,
+    pub(crate) valid_till: TimeStep,
+}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum MessageType {
     /// Initiate a multi-party payjoin
     InitiateMultiPartyPayjoin(BulletinBoardId),
+    /// Register a input in the order book
+    RegisterWalletInput(UTXORegisteration),
 }
 
 define_entity!(

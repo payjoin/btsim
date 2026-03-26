@@ -4,6 +4,7 @@ use log::debug;
 
 use crate::{
     bulletin_board::BulletinBoardId,
+    cospend::UtxoWithAmount,
     message::MessageId,
     transaction::TxId,
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
@@ -52,6 +53,9 @@ pub(crate) enum Action {
     /// Continue to participate in a multi-party payjoin
     ContinueParticipateMultiPartyPayjoin(BulletinBoardId),
     /// Do nothing. There may be better opportunities to spend a payment obligation or participate in a multi-party payjoin.
+    /// Create a cospend proposal: batch payment obligations and pair with order book UTXOs
+    CreateCospendProposal(Vec<PaymentObligationId>),
+    /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
     Wait,
 }
 
@@ -62,6 +66,7 @@ pub(crate) enum PredictedOutcome {
     InitiateMultiPartyPayjoin(InitiateMultiPartyPayjoinOutcome),
     ParticipateMultiPartyPayjoin(ParticipateMultiPartyPayjoinOutcome),
     Consolidation(ConsolidationOutcome),
+    CreateCospendProposal(CreateCospendProposalOutcome),
 }
 
 #[derive(Debug)]
@@ -134,6 +139,28 @@ impl ConsolidationOutcome {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct CreateCospendProposalOutcome {
+    /// Time left on the earliest-deadline payment obligation
+    time_left: i32,
+    /// Base cost: fee_paid + total amount handled. In sats
+    base_cost: f64,
+}
+
+impl CreateCospendProposalOutcome {
+    fn cost(&self, privacy_weight: f64) -> ActionCost {
+        // Similar shape to InitiatePayjoinOutcome -- creating a proposal is
+        // speculative, so the utility increases with time remaining.
+        let points = [
+            (0.0, 0.0),
+            (2.0, privacy_weight),
+            (5.0, 5.0 * privacy_weight),
+        ];
+        let utility = piecewise_linear(self.time_left as f64, &points);
+        ActionCost(self.base_cost - utility)
+    }
+}
+
 /// State of the wallet that can be used to potential enumerate actions
 #[derive(Debug)]
 pub(crate) struct WalletView {
@@ -142,7 +169,8 @@ pub(crate) struct WalletView {
     new_multi_party_payjoins: Vec<(BulletinBoardId, MessageId)>,
     current_timestep: TimeStep,
     wallet_id: WalletId,
-    // TODO: utxos, feerate, cospend oppurtunities, etc.
+    utxos: Vec<UtxoWithAmount>,
+    // TODO: feerate, cospend oppurtunities, etc.
 }
 
 impl WalletView {
@@ -152,6 +180,7 @@ impl WalletView {
         active_multi_party_payjoins: Vec<BulletinBoardId>,
         current_timestep: TimeStep,
         wallet_id: WalletId,
+        utxos: Vec<UtxoWithAmount>,
     ) -> Self {
         Self {
             payment_obligations,
@@ -159,6 +188,7 @@ impl WalletView {
             new_multi_party_payjoins,
             current_timestep,
             wallet_id,
+            utxos,
         }
     }
 }
@@ -244,6 +274,22 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
         events.push(PredictedOutcome::Consolidation(ConsolidationOutcome {
             base_cost: fee_paid_total,
         }));
+    }
+
+    if let Action::CreateCospendProposal(po_ids) = action {
+        let earliest_deadline = po_ids
+            .iter()
+            .map(|id| {
+                id.with(&sim).data().deadline.0 as i32 - wallet_view.current_timestep.0 as i32
+            })
+            .min()
+            .unwrap_or(0);
+        events.push(PredictedOutcome::CreateCospendProposal(
+            CreateCospendProposalOutcome {
+                time_left: earliest_deadline,
+                base_cost: fee_paid_total,
+            },
+        ));
     }
 
     events
@@ -451,6 +497,24 @@ impl Strategy for MultipartyPayjoinParticipantStrategy {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CospendStrategy;
+
+impl Strategy for CospendStrategy {
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+        if state.payment_obligations.is_empty() {
+            return vec![Action::Wait];
+        }
+        let po_ids: Vec<PaymentObligationId> =
+            state.payment_obligations.iter().map(|po| po.id).collect();
+        vec![Action::CreateCospendProposal(po_ids)]
+    }
+
+    fn clone_box(&self) -> Box<dyn Strategy> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct CompositeStrategy {
     pub(crate) strategies: Vec<Box<dyn Strategy>>,
 }
@@ -514,6 +578,9 @@ impl CompositeScorer {
                 PredictedOutcome::Consolidation(event) => {
                     cost = cost + event.cost();
                 }
+                PredictedOutcome::CreateCospendProposal(event) => {
+                    cost = cost + event.cost(self.privacy_weight);
+                }
             }
         }
         cost
@@ -530,6 +597,7 @@ pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
         "MultipartyPayjoinParticipantStrategy" => {
             Ok(Box::new(MultipartyPayjoinParticipantStrategy))
         }
+        "CospendStrategy" => Ok(Box::new(CospendStrategy)),
         _ => Err(format!("Unknown strategy: {}", name)),
     }
 }
@@ -547,6 +615,8 @@ mod tests {
             vec![],
             TimeStep(0),
             WalletId(0),
+            // TODO: populate utxos
+            vec![],
         )
     }
 
@@ -582,7 +652,7 @@ mod tests {
             from: WalletId(0),
             to: WalletId(1),
         };
-        let view = WalletView::new(vec![po], vec![], vec![], TimeStep(0), WalletId(0));
+        let view = WalletView::new(vec![po], vec![], vec![], TimeStep(0), WalletId(0), vec![]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -743,7 +813,7 @@ mod tests {
             to: WalletId(2),
         };
 
-        let view = WalletView::new(vec![po], vec![], vec![], TimeStep(0), WalletId(1));
+        let view = WalletView::new(vec![po], vec![], vec![], TimeStep(0), WalletId(1), vec![]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -771,6 +841,7 @@ mod tests {
             vec![],                                   // No active sessions yet
             TimeStep(0),
             WalletId(1),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -800,6 +871,7 @@ mod tests {
             vec![BulletinBoardId(0)], // Active session
             TimeStep(0),
             WalletId(1),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -830,6 +902,7 @@ mod tests {
             vec![BulletinBoardId(1)],
             TimeStep(0),
             WalletId(1),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);

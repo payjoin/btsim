@@ -15,6 +15,8 @@ use serde::Serialize;
 use crate::bulletin_board::BroadcastMessageType;
 use crate::bulletin_board::BulletinBoardData;
 use crate::bulletin_board::BulletinBoardId;
+use crate::cospend::OrderBookEntry;
+use crate::cospend::UtxoWithAmount;
 use crate::message::MessageType;
 use crate::tx_contruction::MultiPartyPayjoinSession;
 use crate::{
@@ -40,6 +42,7 @@ mod actions;
 mod blocks;
 mod bulletin_board;
 pub mod config;
+mod cospend;
 mod economic_graph;
 mod graphviz;
 mod message;
@@ -588,6 +591,11 @@ impl<'a> Simulation {
         // TODO BroadcastSetHandle
         let bx_id = BroadcastSetId(self.broadcast_set_data.len() - 1);
         bx_id.with_mut(self).broadcast(txs)
+    }
+
+    fn get_orderbook_utxos(&'a self) -> Vec<OrderBookEntry> {
+        // TODO: implement order book storage and population
+        vec![]
     }
 
     // FIXME debug only code?
