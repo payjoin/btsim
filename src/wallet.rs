@@ -449,6 +449,49 @@ impl<'a> WalletHandleMut<'a> {
                 })
                 .collect::<Vec<_>>(),
         );
+
+        // If no candidates, fall back to a plain batch spend
+        let Some(best) = candidates.first() else {
+            self.handle_payment_obligations(po_ids);
+            return;
+        };
+
+        // Collect unique maker wallet IDs from the best candidate
+        let maker_ids: Vec<WalletId> = best
+            .ob_entries
+            .iter()
+            .map(|e| e.owner)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Create a multi-party payjoin session with the selected makers
+        let bulletin_board_id = self.sim.create_bulletin_board();
+
+        // Invite each maker to join the session
+        for maker_id in &maker_ids {
+            self.sim.broadcast_message(
+                *maker_id,
+                self.id,
+                MessageType::InitiateMultiPartyPayjoin(bulletin_board_id),
+            );
+        }
+
+        // Send taker's inputs to the bulletin board
+        let session =
+            SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
+        session.send_inputs();
+        info!("Sent inputs for cospend session");
+
+        // Track the session
+        let session = MultiPartyPayjoinSession {
+            payment_obligation_ids: po_ids.to_owned(),
+            tx_template,
+            state: TxConstructionState::SentInputs,
+        };
+        self.info_mut()
+            .active_multi_party_payjoins
+            .insert(bulletin_board_id, session);
     }
 
     pub(crate) fn do_action(&'a mut self, action: &Action) {
