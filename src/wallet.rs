@@ -53,6 +53,8 @@ define_entity_info!(Wallet, {
         pub(crate) handled_payment_obligations: OrdSet<PaymentObligationId>,
         /// Set of multi-party payjoin sessions that this wallet is participating in
         pub(crate) active_multi_party_payjoins: HashMap<BulletinBoardId, MultiPartyPayjoinSession>,
+        /// UTXOs registered in the order book by this wallet
+        pub(crate) registered_inputs: OrdSet<Outpoint>,
     }
 );
 
@@ -421,6 +423,12 @@ impl<'a> WalletHandleMut<'a> {
                 amount: o.data().amount,
             })
             .collect::<Vec<_>>();
+        let registered_inputs = self
+            .info()
+            .registered_inputs
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         WalletView::new(
             payment_obligations,
             new_multi_party_payjoins,
@@ -428,6 +436,7 @@ impl<'a> WalletHandleMut<'a> {
             self.sim.current_timestep,
             self.id,
             utxos,
+            registered_inputs,
         )
     }
 
@@ -492,6 +501,14 @@ impl<'a> WalletHandleMut<'a> {
             .insert(bulletin_board_id, session);
     }
 
+    fn register_input(&mut self, outpoint: &Outpoint) {
+        if self.info().registered_inputs.contains(outpoint) {
+            return;
+        }
+        self.info_mut().registered_inputs.insert(*outpoint);
+        info!("Wallet {:?} registered input {:?} in order book", self.id, outpoint);
+    }
+
     pub(crate) fn do_action(&'a mut self, action: &Action) {
         match action {
             Action::Wait => {}
@@ -503,9 +520,6 @@ impl<'a> WalletHandleMut<'a> {
             }
             Action::ConsolidateSelf(payment_obligation_id) => {
                 self.consolidate_self(payment_obligation_id);
-            }
-            Action::InitiateMultiPartyPayjoin(po_ids) => {
-                self.create_multi_party_payjoin_session(po_ids);
             }
             Action::ParticipateMultiPartyPayjoin((
                 message_id,
@@ -534,6 +548,9 @@ impl<'a> WalletHandleMut<'a> {
             }
             Action::CreateCospendProposal(po_ids) => {
                 self.create_cospend_proposal(po_ids);
+            }
+            Action::RegisterInput(outpoint) => {
+                self.register_input(outpoint);
             }
         }
     }

@@ -525,6 +525,7 @@ impl<'a> Simulation {
             handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
             active_multi_party_payjoins:
                 im::HashMap::<BulletinBoardId, MultiPartyPayjoinSession>::default(),
+            registered_inputs: OrdSet::<Outpoint>::default(),
         });
 
         let id = WalletId(self.wallet_data.len());
