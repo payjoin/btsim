@@ -525,7 +525,9 @@ impl Strategy for MakerStrategy {
             }
         }
 
-        if actions.is_empty() {
+        // HACK: if are only action is to register another input, we should prefer to wait.
+        // In practice you should be able to register as many inputs as you want.
+        if actions.is_empty() || (actions.len() == 1 && matches!(actions[0], Action::Wait)) {
             actions.push(Action::Wait);
         }
         actions

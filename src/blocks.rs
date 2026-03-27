@@ -194,6 +194,7 @@ impl<'a> BroadcastSetHandleMut<'a> {
                             info.confirmed_utxos.remove(&input.data().outpoint);
                             info.unconfirmed_txos.remove(&input.data().outpoint);
                             info.unconfirmed_spends.remove(&input.data().outpoint);
+                            info.registered_inputs.remove(&input.data().outpoint);
                             info.unconfirmed_transactions.remove(tx);
 
                             // First check if this transaction directly handles a payment obligation
