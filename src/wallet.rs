@@ -343,6 +343,7 @@ impl<'a> WalletHandleMut<'a> {
             TxConstructionState::SentReadyToSign => {
                 let t = SentReadyToSign::new(self.sim, *bulletin_board_id);
                 let res = t.have_enough_ready_to_sign();
+                info!(">>> have enough ready to sign: {:?}, id: {:?}", res, self.id);
                 if let Some(tx) = res {
                     // TODO: only the leader should broadcast the tx right now
                     if self.id.0 != 0 {

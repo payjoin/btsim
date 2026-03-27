@@ -595,8 +595,23 @@ impl<'a> Simulation {
     }
 
     fn get_orderbook_utxos(&'a self) -> Vec<OrderBookEntry> {
-        // TODO: implement order book storage and population
-        vec![]
+        self.wallet_data
+            .iter()
+            .flat_map(|wallet| {
+                let info = &self.wallet_info[wallet.last_wallet_info_id.0];
+                info.registered_inputs
+                    .iter()
+                    .filter(|outpoint| info.confirmed_utxos.contains(outpoint))
+                    .map(|outpoint| OrderBookEntry {
+                        utxo: UtxoWithAmount {
+                            outpoint: *outpoint,
+                            amount: outpoint.with(self).data().amount,
+                        },
+                        owner: wallet.id,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     // FIXME debug only code?
