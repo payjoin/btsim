@@ -48,10 +48,9 @@ pub(crate) enum Action {
     /// Pay a payment obligation while consolidating all UTXOs into change
     ConsolidateSelf(PaymentObligationId),
     /// Participate in Multiparty payjoin
-    ParticipateMultiPartyPayjoin((MessageId, BulletinBoardId, PaymentObligationId)),
+    AcceptCospendProposal((MessageId, BulletinBoardId, PaymentObligationId)),
     /// Continue to participate in a multi-party payjoin
-    ContinueParticipateMultiPartyPayjoin(BulletinBoardId),
-    /// Do nothing. There may be better opportunities to spend a payment obligation or participate in a multi-party payjoin.
+    ContinueParticipateInCospend(BulletinBoardId),
     /// Create a cospend proposal: batch payment obligations and pair with order book UTXOs
     CreateCospendProposal(Vec<PaymentObligationId>),
     /// Register a single UTXO in the order book (maker action)
@@ -64,10 +63,9 @@ pub(crate) enum Action {
 #[derive(Debug)]
 pub(crate) enum PredictedOutcome {
     PaymentObligationsHandled(Vec<PaymentObligationHandledOutcome>),
-    InitiateMultiPartyPayjoin(InitiateMultiPartyPayjoinOutcome),
-    ParticipateMultiPartyPayjoin(ParticipateMultiPartyPayjoinOutcome),
-    Consolidation(ConsolidationOutcome),
+    AcceptCospendProposal(AcceptCospendOutcome),
     CreateCospendProposal(CreateCospendProposalOutcome),
+    Consolidation(ConsolidationOutcome),
     RegisterInput(RegisterInputOutcome),
 }
 
@@ -94,24 +92,6 @@ impl PaymentObligationHandledOutcome {
 }
 
 #[derive(Debug)]
-pub(crate) struct InitiateMultiPartyPayjoinOutcome {
-    /// Time left on the payment obligation
-    time_left: i32,
-    /// Base cost: fee_paid + amount handled. In sats
-    base_cost: f64,
-    /// Upper bound on the number of participants in the multi-party payjoin
-    max_participants: u32,
-}
-
-impl InitiateMultiPartyPayjoinOutcome {
-    fn cost(&self) -> ActionCost {
-        // TODO: take into account the number of participants and their inputs.
-        // For now this costs nothing as testing scaffolding.
-        ActionCost(0.0)
-    }
-}
-
-#[derive(Debug)]
 pub(crate) struct ParticipateMultiPartyPayjoinOutcome {
     /// Time left on the payment obligation
     time_left: i32,
@@ -119,9 +99,30 @@ pub(crate) struct ParticipateMultiPartyPayjoinOutcome {
     base_cost: f64,
 }
 
-impl ParticipateMultiPartyPayjoinOutcome {
+ #[derive(Debug)]
+ pub(crate) struct RespondToPayjoinOutcome {
+     /// Base cost: fee_paid + amount handled. In sats
+     base_cost: f64,
+ }
+ 
+ impl RespondToPayjoinOutcome {
+     fn cost(&self) -> ActionCost {
+         // Responding to a payjoin should always be better than unilaterally spending at this point
+         // As there is no interaction cost. TODO in the future we will want to model the cost of doing
+         // the last round of interaction with the counterparty as a function of rounds remaining.
+         ActionCost(0.0)
+     }
+ }
+ 
+ #[derive(Debug)]
+      // TODO: model the participation utility as a linear function of the progression of the session
+pub(crate) struct AcceptCospendOutcome;
+
+impl AcceptCospendOutcome {
     fn cost(&self) -> ActionCost {
-        // TODO: model the participation utility as a linear function of the progression of the session
+        // TODO: model the participation utility as a linear function of the oppurtunity cost of participating in other cospends
+        // The payoff assigned to participating
+        // And the deadline for the payment obligation that this maker may have
         // For now this costs nothing as testing scaffolding.
         ActionCost(0.0)
     }
@@ -175,7 +176,6 @@ impl RegisterInputOutcome {
     fn cost(&self, coordination_weight: f64) -> ActionCost {
         // More payment obligations = higher cost (wallet should be spending, not registering)
         // TODO: this should be the cost of missing those payments bc we dont have enought inputs to spend
-        // So
         let obligation_pressure = self.num_payment_obligations as f64 * coordination_weight;
         // Registering additional inputs is increasingly costly
         let multi_registration_cost =
@@ -188,8 +188,8 @@ impl RegisterInputOutcome {
 #[derive(Debug)]
 pub(crate) struct WalletView {
     payment_obligations: Vec<PaymentObligationData>,
-    active_multi_party_payjoins: Vec<BulletinBoardId>,
-    new_multi_party_payjoins: Vec<(BulletinBoardId, MessageId)>,
+    active_cospends: Vec<BulletinBoardId>,
+    cospend_proposals: Vec<(BulletinBoardId, MessageId)>,
     current_timestep: TimeStep,
     wallet_id: WalletId,
     utxos: Vec<UtxoWithAmount>,
@@ -199,8 +199,8 @@ pub(crate) struct WalletView {
 impl WalletView {
     pub(crate) fn new(
         payment_obligations: Vec<PaymentObligationData>,
-        new_multi_party_payjoins: Vec<(BulletinBoardId, MessageId)>,
-        active_multi_party_payjoins: Vec<BulletinBoardId>,
+        cospend_proposals: Vec<(BulletinBoardId, MessageId)>,
+        active_cospends: Vec<BulletinBoardId>,
         current_timestep: TimeStep,
         wallet_id: WalletId,
         utxos: Vec<UtxoWithAmount>,
@@ -208,8 +208,8 @@ impl WalletView {
     ) -> Self {
         Self {
             payment_obligations,
-            active_multi_party_payjoins,
-            new_multi_party_payjoins,
+            active_cospends,
+            cospend_proposals,
             current_timestep,
             wallet_id,
             utxos,
@@ -314,6 +314,12 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
                 time_left: earliest_deadline,
                 base_cost: fee_paid_total,
             },
+        ));
+    }
+
+    if let Action::AcceptCospendProposal((_, _, _)) = action {
+        events.push(PredictedOutcome::AcceptCospendProposal(
+            AcceptCospendOutcome,
         ));
     }
 
@@ -443,6 +449,51 @@ impl Strategy for BatchSpender {
 }
 
 #[derive(Debug, Clone)]
+ pub(crate) struct MultipartyPayjoinInitiatorStrategy;
+ 
+ impl Strategy for MultipartyPayjoinInitiatorStrategy {
+     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+         if state.payment_obligations.is_empty() {
+             return vec![Action::Wait];
+         }
+         // TODO: if the sesion is on going do not intiate a new one
+         // TODO: this is scaffolding for now, peers in the future will evaluate if they should initiate a multi-party payjoin given the number of payment obligations
+         if state.wallet_id != WalletId(0) {
+             return vec![Action::Wait];
+         }
+         let receivers = state
+             .payment_obligations
+             .iter()
+             .map(|po| po.to)
+             .collect::<HashSet<_>>();
+         if receivers.len() < 2 {
+             return vec![Action::Wait];
+         }
+ 
+         // TODO: only one multi-party payjoin session can be active at a time FOR NOW
+         let mut actions = vec![];
+        if !state.active_cospends.is_empty() {
+             // If we have an active session we should actively participate in it
+            debug_assert!(state.active_cospends.len() <= 1);
+            for bulletin_board_id in state.active_cospends.iter() {
+                actions.push(Action::ContinueParticipateInCospend(*bulletin_board_id));
+             }
+             return actions;
+         }
+ 
+        actions.push(Action::CreateCospendProposal(
+             state.payment_obligations.iter().map(|po| po.id).collect(),
+         ));
+ 
+         actions
+     }
+ 
+     fn clone_box(&self) -> Box<dyn Strategy> {
+         Box::new(self.clone())
+     }
+ }
+ 
+ #[derive(Debug, Clone)]
 pub(crate) struct MakerStrategy;
 
 impl Strategy for MakerStrategy {
@@ -450,18 +501,15 @@ impl Strategy for MakerStrategy {
         let mut actions = vec![];
 
         // Continue to participate in active sessions
-        for bulletin_board_id in state.active_multi_party_payjoins.iter() {
-            actions.push(Action::ContinueParticipateMultiPartyPayjoin(
-                *bulletin_board_id,
-            ));
+        for bulletin_board_id in state.active_cospends.iter() {
+            actions.push(Action::ContinueParticipateInCospend(*bulletin_board_id));
         }
 
         // Accept new invitations
-        if let Some((bulletin_board_id, message_id)) = state.new_multi_party_payjoins.iter().next()
-        {
-            if state.active_multi_party_payjoins.is_empty() {
+        if let Some((bulletin_board_id, message_id)) = state.cospend_proposals.iter().next() {
+            if state.active_cospends.is_empty() {
                 for po in state.payment_obligations.iter() {
-                    actions.push(Action::ParticipateMultiPartyPayjoin((
+                    actions.push(Action::AcceptCospendProposal((
                         *message_id,
                         *bulletin_board_id,
                         po.id,
@@ -499,12 +547,10 @@ impl Strategy for TakerStrategy {
         let po_ids: Vec<PaymentObligationId> =
             state.payment_obligations.iter().map(|po| po.id).collect();
         // If we have an active session, continue participating in it
-        if !state.active_multi_party_payjoins.is_empty() {
+        if !state.active_cospends.is_empty() {
             let mut actions = vec![];
-            for bulletin_board_id in state.active_multi_party_payjoins.iter() {
-                actions.push(Action::ContinueParticipateMultiPartyPayjoin(
-                    *bulletin_board_id,
-                ));
+            for bulletin_board_id in state.active_cospends.iter() {
+                actions.push(Action::ContinueParticipateInCospend(*bulletin_board_id));
             }
             return actions;
         }
@@ -581,10 +627,7 @@ impl CompositeScorer {
                         cost = cost + outcome.cost(self.payment_obligation_weight);
                     }
                 }
-                PredictedOutcome::InitiateMultiPartyPayjoin(event) => {
-                    cost = cost + event.cost();
-                }
-                PredictedOutcome::ParticipateMultiPartyPayjoin(event) => {
+                PredictedOutcome::AcceptCospendProposal(event) => {
                     cost = cost + event.cost();
                 }
                 PredictedOutcome::Consolidation(event) => {
@@ -880,7 +923,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::ContinueParticipateMultiPartyPayjoin(_))));
+            .any(|a| matches!(a, Action::ContinueParticipateInCospend(_))));
     }
 
     #[test]
@@ -911,7 +954,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::ParticipateMultiPartyPayjoin(_))));
+            .any(|a| matches!(a, Action::AcceptCospendProposal(_))));
     }
 
     #[test]
@@ -942,7 +985,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::ContinueParticipateMultiPartyPayjoin(_))));
+            .any(|a| matches!(a, Action::ContinueParticipateInCospend(_))));
     }
 
     #[test]
@@ -974,7 +1017,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(matches!(
             actions[0],
-            Action::ContinueParticipateMultiPartyPayjoin(BulletinBoardId(1))
+            Action::ContinueParticipateInCospend(BulletinBoardId(1))
         ));
     }
 }

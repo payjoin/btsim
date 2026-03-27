@@ -466,7 +466,8 @@ impl<'a> WalletHandleMut<'a> {
         };
 
         // Collect unique maker wallet IDs from the best candidate
-        let maker_ids: Vec<WalletId> = candidates.iter()
+        let maker_ids: Vec<WalletId> = candidates
+            .iter()
             .map(|e| e.owner)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -485,8 +486,7 @@ impl<'a> WalletHandleMut<'a> {
         }
 
         // Send taker's inputs to the bulletin board
-        let session =
-            SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
+        let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
         session.send_inputs();
         info!("Sent inputs for cospend session");
 
@@ -506,7 +506,10 @@ impl<'a> WalletHandleMut<'a> {
             return;
         }
         self.info_mut().registered_inputs.insert(*outpoint);
-        info!("Wallet {:?} registered input {:?} in order book", self.id, outpoint);
+        info!(
+            "Wallet {:?} registered input {:?} in order book",
+            self.id, outpoint
+        );
     }
 
     pub(crate) fn do_action(&'a mut self, action: &Action) {
@@ -521,7 +524,7 @@ impl<'a> WalletHandleMut<'a> {
             Action::ConsolidateSelf(payment_obligation_id) => {
                 self.consolidate_self(payment_obligation_id);
             }
-            Action::ParticipateMultiPartyPayjoin((
+            Action::AcceptCospendProposal((
                 message_id,
                 bulletin_board_id,
                 payment_obligation_id,
@@ -543,7 +546,7 @@ impl<'a> WalletHandleMut<'a> {
                 self.data_mut().messages_processed.insert(*message_id);
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
             }
-            Action::ContinueParticipateMultiPartyPayjoin(bulletin_board_id) => {
+            Action::ContinueParticipateInCospend(bulletin_board_id) => {
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
             }
             Action::CreateCospendProposal(po_ids) => {
