@@ -79,6 +79,7 @@ pub(crate) struct PaymentObligationHandledOutcome {
 
 impl PaymentObligationHandledOutcome {
     fn cost(&self, payment_obligation_weight: f64) -> ActionCost {
+        // TODO: include fee rate
         let points = [
             (0.0, 2.0 * payment_obligation_weight),
             (2.0, payment_obligation_weight),
@@ -99,23 +100,8 @@ pub(crate) struct ParticipateMultiPartyPayjoinOutcome {
     base_cost: f64,
 }
 
- #[derive(Debug)]
- pub(crate) struct RespondToPayjoinOutcome {
-     /// Base cost: fee_paid + amount handled. In sats
-     base_cost: f64,
- }
- 
- impl RespondToPayjoinOutcome {
-     fn cost(&self) -> ActionCost {
-         // Responding to a payjoin should always be better than unilaterally spending at this point
-         // As there is no interaction cost. TODO in the future we will want to model the cost of doing
-         // the last round of interaction with the counterparty as a function of rounds remaining.
-         ActionCost(0.0)
-     }
- }
- 
- #[derive(Debug)]
-      // TODO: model the participation utility as a linear function of the progression of the session
+#[derive(Debug)]
+// TODO: model the participation utility as a linear function of the progression of the session
 pub(crate) struct AcceptCospendOutcome;
 
 impl AcceptCospendOutcome {
@@ -449,51 +435,6 @@ impl Strategy for BatchSpender {
 }
 
 #[derive(Debug, Clone)]
- pub(crate) struct MultipartyPayjoinInitiatorStrategy;
- 
- impl Strategy for MultipartyPayjoinInitiatorStrategy {
-     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
-         if state.payment_obligations.is_empty() {
-             return vec![Action::Wait];
-         }
-         // TODO: if the sesion is on going do not intiate a new one
-         // TODO: this is scaffolding for now, peers in the future will evaluate if they should initiate a multi-party payjoin given the number of payment obligations
-         if state.wallet_id != WalletId(0) {
-             return vec![Action::Wait];
-         }
-         let receivers = state
-             .payment_obligations
-             .iter()
-             .map(|po| po.to)
-             .collect::<HashSet<_>>();
-         if receivers.len() < 2 {
-             return vec![Action::Wait];
-         }
- 
-         // TODO: only one multi-party payjoin session can be active at a time FOR NOW
-         let mut actions = vec![];
-        if !state.active_cospends.is_empty() {
-             // If we have an active session we should actively participate in it
-            debug_assert!(state.active_cospends.len() <= 1);
-            for bulletin_board_id in state.active_cospends.iter() {
-                actions.push(Action::ContinueParticipateInCospend(*bulletin_board_id));
-             }
-             return actions;
-         }
- 
-        actions.push(Action::CreateCospendProposal(
-             state.payment_obligations.iter().map(|po| po.id).collect(),
-         ));
- 
-         actions
-     }
- 
-     fn clone_box(&self) -> Box<dyn Strategy> {
-         Box::new(self.clone())
-     }
- }
- 
- #[derive(Debug, Clone)]
 pub(crate) struct MakerStrategy;
 
 impl Strategy for MakerStrategy {

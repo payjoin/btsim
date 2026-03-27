@@ -54,6 +54,7 @@ define_entity_info!(Wallet, {
         /// Set of multi-party payjoin sessions that this wallet is participating in
         pub(crate) active_multi_party_payjoins: HashMap<BulletinBoardId, MultiPartyPayjoinSession>,
         /// UTXOs registered in the order book by this wallet
+        // TODO: this should be moved to wallet data
         pub(crate) registered_inputs: OrdSet<Outpoint>,
     }
 );
@@ -248,9 +249,6 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     fn create_multi_party_payjoin_session(&mut self, po_ids: &[PaymentObligationId]) {
-        if self.id.0 != 0 {
-            return; // TODO For now the first wallet is the leader
-        }
         // First we create the bulletin board
         let bulletin_board_id = self.sim.create_bulletin_board();
         // Then we invite all members to join
@@ -273,6 +271,7 @@ impl<'a> WalletHandleMut<'a> {
             payment_obligation_ids: po_ids.to_owned(),
             tx_template,
             state: TxConstructionState::SentInputs,
+            is_initiator: true,
         };
         self.info_mut()
             .active_multi_party_payjoins
@@ -343,22 +342,26 @@ impl<'a> WalletHandleMut<'a> {
             TxConstructionState::SentReadyToSign => {
                 let t = SentReadyToSign::new(self.sim, *bulletin_board_id);
                 let res = t.have_enough_ready_to_sign();
-                info!(">>> have enough ready to sign: {:?}, id: {:?}", res, self.id);
                 if let Some(tx) = res {
-                    // TODO: only the leader should broadcast the tx right now
-                    if self.id.0 != 0 {
+                    if !session.is_initiator {
+                        let mut updated_session = session.clone();
+                        updated_session.state = TxConstructionState::Success(None);
+
+                        // TODO: update latest wallet info index in wallet data
+                        self.info_mut()
+                            .active_multi_party_payjoins
+                            .insert(*bulletin_board_id, updated_session);
                         return;
                     }
-                    println!("tx: {:?}", tx);
                     let tx_id = self.spend_tx(tx);
-                    log::info!(
-                        "Multi party payjoin session successful with bulletin board id: {:?}",
-                        bulletin_board_id
-                    );
                     self.broadcast(std::iter::once(tx_id));
-                    // Update session state to success
+                    let po_ids = session.payment_obligation_ids.clone();
+                    self.info_mut()
+                        .txid_to_payment_obligation_ids
+                        .insert(tx_id, po_ids);
+                    // TODO: update latest wallet info index in wallet data
                     let mut updated_session = session.clone();
-                    updated_session.state = TxConstructionState::Success(tx_id);
+                    updated_session.state = TxConstructionState::Success(Some(tx_id));
                     self.info_mut()
                         .active_multi_party_payjoins
                         .insert(*bulletin_board_id, updated_session);
@@ -441,6 +444,8 @@ impl<'a> WalletHandleMut<'a> {
         )
     }
 
+    // TODO: this should take input the list of order book entries
+    // Candidate selection should be done by the cost function
     pub(crate) fn create_cospend_proposal(&'a mut self, po_ids: &[PaymentObligationId]) {
         // TODO: change should be decomposed.
         let change_addr = self.new_address();
@@ -461,10 +466,10 @@ impl<'a> WalletHandleMut<'a> {
         );
 
         // If no candidates, fall back to a plain batch spend
-        let Some(_) = candidates.first() else {
+        if candidates.is_empty() {
             self.handle_payment_obligations(po_ids);
             return;
-        };
+        }
 
         // Collect unique maker wallet IDs from the best candidate
         let maker_ids: Vec<WalletId> = candidates
@@ -496,6 +501,7 @@ impl<'a> WalletHandleMut<'a> {
             payment_obligation_ids: po_ids.to_owned(),
             tx_template,
             state: TxConstructionState::SentInputs,
+            is_initiator: true,
         };
         self.info_mut()
             .active_multi_party_payjoins
@@ -516,6 +522,7 @@ impl<'a> WalletHandleMut<'a> {
     pub(crate) fn do_action(&'a mut self, action: &Action) {
         match action {
             Action::Wait => {}
+            // TODO: the next 3 actions can be folded into one spend action, param'd off # of po's and coin selection strategy. All of them are unilateral
             Action::UnilateralSpend(po) => {
                 self.handle_payment_obligations(&[*po]);
             }
@@ -523,6 +530,7 @@ impl<'a> WalletHandleMut<'a> {
                 self.handle_payment_obligations(po_ids);
             }
             Action::ConsolidateSelf(payment_obligation_id) => {
+                // TODO: this should be folded into batch spend.
                 self.consolidate_self(payment_obligation_id);
             }
             Action::AcceptCospendProposal((
@@ -541,6 +549,7 @@ impl<'a> WalletHandleMut<'a> {
                         tx_template,
                         // TODO: better state for someone who has not started the session yet
                         state: TxConstructionState::SentBulletinBoardId,
+                        is_initiator: false,
                     },
                 );
                 // Mark message as processed

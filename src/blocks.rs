@@ -204,6 +204,20 @@ impl<'a> BroadcastSetHandleMut<'a> {
                             {
                                 info.handled_payment_obligations
                                     .extend(payment_obligation_ids.iter().map(|id| *id));
+
+                                for (_, mppj_session) in info.active_multi_party_payjoins.iter() {
+                                    if mppj_session
+                                        .tx_template
+                                        .inputs
+                                        .iter()
+                                        .any(|i| i.outpoint == input.data().outpoint)
+                                    {
+                                        info.handled_payment_obligations.extend(
+                                            mppj_session.payment_obligation_ids.iter().copied(),
+                                        );
+                                        break;
+                                    }
+                                }
                             }
                         })
                     }
