@@ -22,6 +22,8 @@ pub(crate) struct MultiPartyPayjoinSession {
     pub(crate) tx_template: TxData,
     /// The state of the session
     pub(crate) state: TxConstructionState,
+    /// True if this wallet created the session (taker/initiator), false for makers/participants
+    pub(crate) is_initiator: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +32,7 @@ pub(crate) enum TxConstructionState {
     SentInputs,
     SentOutputs,
     SentReadyToSign,
-    Success(TxId),
+    Success(Option<TxId>),
 }
 
 #[derive(Debug)]
