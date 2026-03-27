@@ -410,56 +410,56 @@ impl Strategy for BatchSpender {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MultipartyPayjoinInitiatorStrategy;
-
-impl Strategy for MultipartyPayjoinInitiatorStrategy {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
-        if state.payment_obligations.is_empty() {
-            return vec![Action::Wait];
-        }
-        // TODO: if the sesion is on going do not intiate a new one
-        // TODO: this is scaffolding for now, peers in the future will evaluate if they should initiate a multi-party payjoin given the number of payment obligations
-        if state.wallet_id != WalletId(0) {
-            return vec![Action::Wait];
-        }
-        let receivers = state
-            .payment_obligations
-            .iter()
-            .map(|po| po.to)
-            .collect::<HashSet<_>>();
-        if receivers.len() < 2 {
-            return vec![Action::Wait];
-        }
-
-        // TODO: only one multi-party payjoin session can be active at a time FOR NOW
-        let mut actions = vec![];
-        if !state.active_multi_party_payjoins.is_empty() {
-            // If we have an active session we should actively participate in it
-            debug_assert!(state.active_multi_party_payjoins.len() <= 1);
-            for bulletin_board_id in state.active_multi_party_payjoins.iter() {
-                actions.push(Action::ContinueParticipateMultiPartyPayjoin(
-                    *bulletin_board_id,
-                ));
-            }
-            return actions;
-        }
-
-        actions.push(Action::InitiateMultiPartyPayjoin(
-            state.payment_obligations.iter().map(|po| po.id).collect(),
-        ));
-
-        actions
-    }
-
-    fn clone_box(&self) -> Box<dyn Strategy> {
-        Box::new(self.clone())
-    }
-}
-
+ pub(crate) struct MultipartyPayjoinInitiatorStrategy;
+ 
+ impl Strategy for MultipartyPayjoinInitiatorStrategy {
+     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+         if state.payment_obligations.is_empty() {
+             return vec![Action::Wait];
+         }
+         // TODO: if the sesion is on going do not intiate a new one
+         // TODO: this is scaffolding for now, peers in the future will evaluate if they should initiate a multi-party payjoin given the number of payment obligations
+         if state.wallet_id != WalletId(0) {
+             return vec![Action::Wait];
+         }
+         let receivers = state
+             .payment_obligations
+             .iter()
+             .map(|po| po.to)
+             .collect::<HashSet<_>>();
+         if receivers.len() < 2 {
+             return vec![Action::Wait];
+         }
+ 
+         // TODO: only one multi-party payjoin session can be active at a time FOR NOW
+         let mut actions = vec![];
+         if !state.active_multi_party_payjoins.is_empty() {
+             // If we have an active session we should actively participate in it
+             debug_assert!(state.active_multi_party_payjoins.len() <= 1);
+             for bulletin_board_id in state.active_multi_party_payjoins.iter() {
+                 actions.push(Action::ContinueParticipateMultiPartyPayjoin(
+                     *bulletin_board_id,
+                 ));
+             }
+             return actions;
+         }
+ 
+         actions.push(Action::InitiateMultiPartyPayjoin(
+             state.payment_obligations.iter().map(|po| po.id).collect(),
+         ));
+ 
+         actions
+     }
+ 
+     fn clone_box(&self) -> Box<dyn Strategy> {
+         Box::new(self.clone())
+     }
+ }
+ 
 #[derive(Debug, Clone)]
-pub(crate) struct MultipartyPayjoinParticipantStrategy;
+pub(crate) struct MakerStrategy;
 
-impl Strategy for MultipartyPayjoinParticipantStrategy {
+impl Strategy for MakerStrategy {
     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
         if state.payment_obligations.is_empty() {
             return vec![Action::Wait];
@@ -497,15 +497,37 @@ impl Strategy for MultipartyPayjoinParticipantStrategy {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CospendStrategy;
+pub(crate) struct TakerStrategy;
 
-impl Strategy for CospendStrategy {
+impl Strategy for TakerStrategy {
     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
         if state.payment_obligations.is_empty() {
             return vec![Action::Wait];
         }
+        let po_ids: Vec<PaymentObligationId> = state
+            .payment_obligations
+            .iter()
+            .map(|po| po.id)
+            .collect();
         let po_ids: Vec<PaymentObligationId> =
             state.payment_obligations.iter().map(|po| po.id).collect();
+
+        // If we have an active session, continue participating in it
+        if !state.active_multi_party_payjoins.is_empty() {
+            let mut actions = vec![];
+            for bulletin_board_id in state.active_multi_party_payjoins.iter() {
+                actions.push(Action::ContinueParticipateMultiPartyPayjoin(
+                    *bulletin_board_id,
+                ));
+            }
+            return actions;
+        }
+
+        let po_ids: Vec<PaymentObligationId> = state
+            .payment_obligations
+            .iter()
+            .map(|po| po.id)
+            .collect();
         vec![Action::CreateCospendProposal(po_ids)]
     }
 
@@ -593,11 +615,8 @@ pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
         "UnilateralSpender" => Ok(Box::new(UnilateralSpender)),
         "Consolidator" => Ok(Box::new(Consolidator)),
         "BatchSpender" => Ok(Box::new(BatchSpender)),
-        "MultipartyPayjoinInitiatorStrategy" => Ok(Box::new(MultipartyPayjoinInitiatorStrategy)),
-        "MultipartyPayjoinParticipantStrategy" => {
-            Ok(Box::new(MultipartyPayjoinParticipantStrategy))
-        }
-        "CospendStrategy" => Ok(Box::new(CospendStrategy)),
+        "TakerStrategy" => Ok(Box::new(TakerStrategy)),
+        "MakerStrategy" => Ok(Box::new(MakerStrategy)),
         _ => Err(format!("Unknown strategy: {}", name)),
     }
 }
@@ -740,47 +759,78 @@ mod tests {
     }
 
     #[test]
-    fn test_multiparty_initiator_with_insufficient_receivers() {
-        let strategy = MultipartyPayjoinInitiatorStrategy;
-
-        // Only 1 unique receiver - not enough for multi-party
-        let po1 = PaymentObligationData {
-            id: PaymentObligationId(0),
-            deadline: TimeStep(100),
-            reveal_time: TimeStep(0),
-            amount: Amount::from_sat(1000),
-            from: WalletId(0),
-            to: WalletId(1), // Same receiver
-        };
-        let po2 = PaymentObligationData {
-            id: PaymentObligationId(1),
-            deadline: TimeStep(100),
-            reveal_time: TimeStep(0),
-            amount: Amount::from_sat(2000),
-            from: WalletId(0),
-            to: WalletId(1), // Same receiver
-        };
+     fn test_multiparty_initiator_with_insufficient_receivers() {
+         let strategy = MultipartyPayjoinInitiatorStrategy;
+ 
+         // Only 1 unique receiver - not enough for multi-party
+         let po1 = PaymentObligationData {
+             id: PaymentObligationId(0),
+             deadline: TimeStep(100),
+             reveal_time: TimeStep(0),
+             amount: Amount::from_sat(1000),
+             from: WalletId(0),
+             to: WalletId(1), // Same receiver
+         };
+         let po2 = PaymentObligationData {
+             id: PaymentObligationId(1),
+             deadline: TimeStep(100),
+             reveal_time: TimeStep(0),
+             amount: Amount::from_sat(2000),
+             from: WalletId(0),
+             to: WalletId(1), // Same receiver
+         };
         let view = create_test_wallet_view(vec![po1, po2]);
+ 
+         let actions = strategy.enumerate_candidate_actions(&view);
+ 
+         // Should return Wait because we need at least 2 different receivers
+         assert_eq!(actions.len(), 1);
+         assert!(matches!(actions[0], Action::Wait));
+     }
+ 
+     #[test]
+     fn test_multiparty_initiator_with_multiple_receivers() {
+         let strategy = MultipartyPayjoinInitiatorStrategy;
+ 
+         // 2 different receivers - enough for multi-party
+         let po1 = PaymentObligationData {
+             id: PaymentObligationId(0),
+             deadline: TimeStep(100),
+             reveal_time: TimeStep(0),
+             amount: Amount::from_sat(1000),
+             from: WalletId(0),
+             to: WalletId(1), // Receiver 1
+         };
+         let po2 = PaymentObligationData {
+             id: PaymentObligationId(1),
+             deadline: TimeStep(100),
+             reveal_time: TimeStep(0),
+             amount: Amount::from_sat(2000),
+             from: WalletId(0),
+             to: WalletId(2), // Receiver 2 (different)
+         };
+        let view = create_test_wallet_view(vec![po1, po2]);
+ 
+         let actions = strategy.enumerate_candidate_actions(&view);
+ 
+         assert_eq!(actions.len(), 1);
+         assert!(actions
+             .iter()
+             .any(|a| matches!(a, Action::InitiateMultiPartyPayjoin(ids) if ids.len() == 2)));
+     }
+ 
+     #[test]
+     fn test_multiparty_initiator_only_wallet_0() {
+     
+        let strategy = TakerStrategy;
 
-        let actions = strategy.enumerate_candidate_actions(&view);
-
-        // Should return Wait because we need at least 2 different receivers
-        assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Wait));
-    }
-
-    #[test]
-    fn test_multiparty_initiator_with_multiple_receivers() {
-        let strategy = MultipartyPayjoinInitiatorStrategy;
-
-        // 2 different receivers - enough for multi-party
         let po1 = PaymentObligationData {
             id: PaymentObligationId(0),
             deadline: TimeStep(100),
             reveal_time: TimeStep(0),
             amount: Amount::from_sat(1000),
             from: WalletId(0),
-            to: WalletId(1), // Receiver 1
+            to: WalletId(1),
         };
         let po2 = PaymentObligationData {
             id: PaymentObligationId(1),
@@ -788,8 +838,10 @@ mod tests {
             reveal_time: TimeStep(0),
             amount: Amount::from_sat(2000),
             from: WalletId(0),
-            to: WalletId(2), // Receiver 2 (different)
+            to: WalletId(2),
         };
+ 
+        // Create view with wallet_id = 1 (not 0)
         let view = create_test_wallet_view(vec![po1, po2]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -797,34 +849,42 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::InitiateMultiPartyPayjoin(ids) if ids.len() == 2)));
+            .any(|a| matches!(a, Action::CreateCospendProposal(ids) if ids.len() == 2)));
     }
 
     #[test]
-    fn test_multiparty_initiator_only_wallet_0() {
-        let strategy = MultipartyPayjoinInitiatorStrategy;
+    fn test_taker_continues_active_session() {
+        let strategy = TakerStrategy;
 
         let po = PaymentObligationData {
             id: PaymentObligationId(0),
             deadline: TimeStep(100),
             reveal_time: TimeStep(0),
             amount: Amount::from_sat(1000),
-            from: WalletId(1), // Not wallet 0
-            to: WalletId(2),
+            from: WalletId(0),
+            to: WalletId(1),
         };
 
-        let view = WalletView::new(vec![po], vec![], vec![], TimeStep(0), WalletId(1), vec![]);
+        let view = WalletView::new(
+            vec![po],
+            vec![],
+            vec![BulletinBoardId(0)], // Active session
+            TimeStep(0),
+            WalletId(0),
+            vec![],
+        );
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
-        // Should return Wait because only Wallet 0 can initiate
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Wait));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::ContinueParticipateMultiPartyPayjoin(_))));
     }
 
     #[test]
-    fn test_multiparty_participant_with_new_invitation() {
-        let strategy = MultipartyPayjoinParticipantStrategy;
+    fn test_maker_with_new_invitation() {
+        let strategy = MakerStrategy;
 
         let po = PaymentObligationData {
             id: PaymentObligationId(0),
@@ -853,8 +913,8 @@ mod tests {
     }
 
     #[test]
-    fn test_multiparty_participant_with_active_session() {
-        let strategy = MultipartyPayjoinParticipantStrategy;
+    fn test_maker_with_active_session() {
+        let strategy = MakerStrategy;
 
         let po = PaymentObligationData {
             id: PaymentObligationId(0),
@@ -883,8 +943,8 @@ mod tests {
     }
 
     #[test]
-    fn test_multiparty_participant_prefers_continue_when_invite_and_active() {
-        let strategy = MultipartyPayjoinParticipantStrategy;
+    fn test_maker_prefers_continue_when_invite_and_active() {
+        let strategy = MakerStrategy;
 
         let po = PaymentObligationData {
             id: PaymentObligationId(0),

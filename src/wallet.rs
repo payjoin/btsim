@@ -451,15 +451,13 @@ impl<'a> WalletHandleMut<'a> {
         );
 
         // If no candidates, fall back to a plain batch spend
-        let Some(best) = candidates.first() else {
+        let Some(_) = candidates.first() else {
             self.handle_payment_obligations(po_ids);
             return;
         };
 
         // Collect unique maker wallet IDs from the best candidate
-        let maker_ids: Vec<WalletId> = best
-            .ob_entries
-            .iter()
+        let maker_ids: Vec<WalletId> = candidates.iter()
             .map(|e| e.owner)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
