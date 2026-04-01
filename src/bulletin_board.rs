@@ -1,7 +1,4 @@
-use crate::{
-    message::PayjoinProposal,
-    transaction::{Outpoint, Output},
-};
+use crate::transaction::{Outpoint, Output};
 
 define_entity!(
     BulletinBoard,
@@ -21,9 +18,7 @@ impl<'a> BulletinBoardHandle<'a> {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum BroadcastMessageType {
-    InitiatePayjoin(PayjoinProposal),
     ContributeInputs(Outpoint),
     ContributeOutputs(Output),
     ReadyToSign(),
-    // TODO: witness for multi-party payjoin?
 }

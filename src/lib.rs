@@ -517,9 +517,6 @@ impl<'a> Simulation {
             unconfirmed_txos: OrdSet::<Outpoint>::default(),
             confirmed_utxos: OrdSet::<Outpoint>::default(),
             unconfirmed_spends: OrdSet::<Outpoint>::default(),
-            unconfirmed_txos_in_payjoins: im::HashMap::<Outpoint, BulletinBoardId>::default(),
-            initiated_payjoins: im::HashMap::<PaymentObligationId, BulletinBoardId>::default(),
-            received_payjoins: im::HashMap::<PaymentObligationId, BulletinBoardId>::default(),
             txid_to_payment_obligation_ids: im::HashMap::<TxId, Vec<PaymentObligationId>>::default(
             ),
             handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
@@ -994,11 +991,7 @@ mod tests {
         let wallet_types = vec![WalletTypeConfig {
             name: "default".to_string(),
             count: 2,
-            strategies: vec![
-                "UnilateralSpender".to_string(),
-                "BatchSpender".to_string(),
-                "PayjoinStrategy".to_string(),
-            ],
+            strategies: vec!["UnilateralSpender".to_string(), "BatchSpender".to_string()],
             scorer: ScorerConfig {
                 fee_savings_weight: 1.0,
                 privacy_weight: 2.0,
@@ -1020,12 +1013,10 @@ mod tests {
         let alice_strategies = vec![
             create_strategy("UnilateralSpender").unwrap(),
             create_strategy("BatchSpender").unwrap(),
-            create_strategy("PayjoinStrategy").unwrap(),
         ];
         let bob_strategies = vec![
             create_strategy("UnilateralSpender").unwrap(),
             create_strategy("BatchSpender").unwrap(),
-            create_strategy("PayjoinStrategy").unwrap(),
         ];
         let alice = sim.new_wallet(
             CompositeStrategy {

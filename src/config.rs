@@ -28,9 +28,9 @@ pub struct WalletTypeConfig {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ScorerConfig {
-    /// Weight applied to fee savings in sats from payjoin transactions
+    /// Weight applied to fee savings in sats
     pub fee_savings_weight: f64,
-    /// Weight applied to privacy score from payjoin transactions
+    /// Weight applied to privacy score
     pub privacy_weight: f64,
     /// Weight applied to deadline urgency for payment obligations
     pub payment_obligation_weight: f64,
@@ -48,7 +48,6 @@ impl Config {
             "UnilateralSpender",
             "Consolidator",
             "BatchSpender",
-            "PayjoinStrategy",
             "MultipartyPayjoinInitiatorStrategy",
             "MultipartyPayjoinParticipantStrategy",
         ];
