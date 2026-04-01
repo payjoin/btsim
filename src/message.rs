@@ -1,6 +1,6 @@
 use crate::{
     bulletin_board::BulletinBoardId,
-    transaction::{InputId, TxData},
+    transaction::InputId,
     wallet::WalletId,
     TimeStep,
 };
@@ -13,15 +13,7 @@ pub(crate) struct UTXORegisteration {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct PayjoinProposal {
-    pub(crate) tx: TxData,
-    pub(crate) valid_till: TimeStep,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum MessageType {
-    /// Initiate a cospend with the receiver of payment
-    InitiatePayjoin(BulletinBoardId),
     /// Initiate a multi-party payjoin
     InitiateMultiPartyPayjoin(BulletinBoardId),
     /// Register a input in the order book

@@ -5,7 +5,7 @@ use log::debug;
 use crate::{
     bulletin_board::BulletinBoardId,
     cospend::UtxoWithAmount,
-    message::{MessageId, PayjoinProposal},
+    message::MessageId,
     transaction::TxId,
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
     Simulation, TimeStep,
@@ -47,15 +47,6 @@ pub(crate) enum Action {
     BatchSpend(Vec<PaymentObligationId>),
     /// Pay a payment obligation while consolidating all UTXOs into change
     ConsolidateSelf(PaymentObligationId),
-    /// Initiate a payjoin with a counterparty
-    InitiatePayjoin(PaymentObligationId),
-    /// respond to a payjoin proposal
-    RespondToPayjoin(
-        PayjoinProposal,
-        PaymentObligationId,
-        BulletinBoardId,
-        MessageId,
-    ),
     InitiateMultiPartyPayjoin(Vec<PaymentObligationId>),
     /// Participate in Multiparty payjoin
     ParticipateMultiPartyPayjoin((MessageId, BulletinBoardId, PaymentObligationId)),
@@ -63,7 +54,7 @@ pub(crate) enum Action {
     ContinueParticipateMultiPartyPayjoin(BulletinBoardId),
     /// Create a cospend proposal: batch payment obligations and pair with order book UTXOs
     CreateCospendProposal(Vec<PaymentObligationId>),
-    /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
+    /// Do nothing. There may be better opportunities to spend a payment obligation or participate in a multi-party payjoin.
     Wait,
 }
 
@@ -71,8 +62,6 @@ pub(crate) enum Action {
 #[derive(Debug)]
 pub(crate) enum PredictedOutcome {
     PaymentObligationsHandled(Vec<PaymentObligationHandledOutcome>),
-    InitiatePayjoin(InitiatePayjoinOutcome),
-    RespondToPayjoin(RespondToPayjoinOutcome),
     InitiateMultiPartyPayjoin(InitiateMultiPartyPayjoinOutcome),
     ParticipateMultiPartyPayjoin(ParticipateMultiPartyPayjoinOutcome),
     Consolidation(ConsolidationOutcome),
@@ -102,48 +91,6 @@ impl PaymentObligationHandledOutcome {
 }
 
 #[derive(Debug)]
-pub(crate) struct InitiatePayjoinOutcome {
-    /// Time left on the payment obligation
-    time_left: i32,
-    /// Base cost: fee_paid + amount handled. In sats
-    base_cost: f64,
-}
-
-impl InitiatePayjoinOutcome {
-    /// Batching anxiety should increase and payjoin utility should decrease the closer the deadline is.
-    /// This can be modeled as a inverse cubic function of the time left.
-    /// privacy are evaluated independently via per-dimension weights.
-    /// TODO: This privacy term is being mis used here. Its just capaturing you value doing payjoins not privacy. A better way to compare the value of different outcomes is just
-    /// fee savings. Which should be reflected in the base cost anways.
-    fn cost(&self, privacy_weight: f64) -> ActionCost {
-        let points = [
-            (0.0, 0.0),
-            (2.0, privacy_weight),
-            (5.0, 5.0 * privacy_weight),
-        ];
-        let utility = piecewise_linear(self.time_left as f64, &points);
-        let cost = self.base_cost - utility;
-        debug!("InitiatePayjoinEvent cost: {:?}", cost);
-        ActionCost(cost)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct RespondToPayjoinOutcome {
-    /// Base cost: fee_paid + amount handled. In sats
-    base_cost: f64,
-}
-
-impl RespondToPayjoinOutcome {
-    fn cost(&self) -> ActionCost {
-        // Responding to a payjoin should always be better than unilaterally spending at this point
-        // As there is no interaction cost. TODO in the future we will want to model the cost of doing
-        // the last round of interaction with the counterparty as a function of rounds remaining.
-        ActionCost(0.0)
-    }
-}
-
-#[derive(Debug)]
 pub(crate) struct InitiateMultiPartyPayjoinOutcome {
     /// Time left on the payment obligation
     time_left: i32,
@@ -155,8 +102,7 @@ pub(crate) struct InitiateMultiPartyPayjoinOutcome {
 
 impl InitiateMultiPartyPayjoinOutcome {
     fn cost(&self) -> ActionCost {
-        // TODO This should have a similar "shape" as the initiate payjoin but with a different utility function.
-        // taking into accounts the number of participants, their inputs.
+        // TODO: take into account the number of participants and their inputs.
         // For now this costs nothing as testing scaffolding.
         ActionCost(0.0)
     }
@@ -202,8 +148,7 @@ pub(crate) struct CreateCospendProposalOutcome {
 
 impl CreateCospendProposalOutcome {
     fn cost(&self, privacy_weight: f64) -> ActionCost {
-        // Similar shape to InitiatePayjoinOutcome -- creating a proposal is
-        // speculative, so the utility increases with time remaining.
+        // Creating a proposal is speculative, so the utility increases with time remaining.
         let points = [
             (0.0, 0.0),
             (2.0, privacy_weight),
@@ -218,7 +163,6 @@ impl CreateCospendProposalOutcome {
 #[derive(Debug)]
 pub(crate) struct WalletView {
     payment_obligations: Vec<PaymentObligationData>,
-    payjoin_proposals: Vec<(MessageId, BulletinBoardId, PayjoinProposal)>,
     active_multi_party_payjoins: Vec<BulletinBoardId>,
     new_multi_party_payjoins: Vec<(BulletinBoardId, MessageId)>,
     current_timestep: TimeStep,
@@ -230,7 +174,6 @@ pub(crate) struct WalletView {
 impl WalletView {
     pub(crate) fn new(
         payment_obligations: Vec<PaymentObligationData>,
-        payjoin_proposals: Vec<(MessageId, BulletinBoardId, PayjoinProposal)>,
         new_multi_party_payjoins: Vec<(BulletinBoardId, MessageId)>,
         active_multi_party_payjoins: Vec<BulletinBoardId>,
         current_timestep: TimeStep,
@@ -239,7 +182,6 @@ impl WalletView {
     ) -> Self {
         Self {
             payment_obligations,
-            payjoin_proposals,
             active_multi_party_payjoins,
             new_multi_party_payjoins,
             current_timestep,
@@ -346,38 +288,6 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
         ));
     }
 
-    // Check if the wallet initiated a payjoin
-    let old_initiated_payjoins = old_info.initiated_payjoins;
-    let new_initiated_payjoins = new_info.initiated_payjoins.clone();
-    if let Some((payment_obligation_id, _)) = new_initiated_payjoins
-        .difference(old_initiated_payjoins)
-        .into_iter()
-        .next()
-    {
-        let po = payment_obligation_id.with(&sim).data();
-        let amount_handled = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
-        events.push(PredictedOutcome::InitiatePayjoin(InitiatePayjoinOutcome {
-            time_left: po.deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
-            base_cost: fee_paid_total + amount_handled,
-        }));
-    }
-
-    let old_received_payjoins = old_info.received_payjoins;
-    let new_received_payjoins = new_info.received_payjoins.clone();
-    if let Some((payment_obligation_id, _)) = new_received_payjoins
-        .difference(old_received_payjoins)
-        .into_iter()
-        .next()
-    {
-        let po = payment_obligation_id.with(&sim).data();
-        let amount_handled = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
-        events.push(PredictedOutcome::RespondToPayjoin(
-            RespondToPayjoinOutcome {
-                base_cost: fee_paid_total + amount_handled,
-            },
-        ));
-    }
-
     events
 }
 
@@ -435,7 +345,7 @@ impl Add for ActionCost {
 pub(crate) struct UnilateralSpender;
 
 impl Strategy for UnilateralSpender {
-    /// The decision space of the unilateral spender is the set of all payment obligations and payjoin proposals
+    /// The decision space of the unilateral spender is the set of all payment obligations
     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
         if state.payment_obligations.is_empty() {
             return vec![Action::Wait];
@@ -488,41 +398,6 @@ impl Strategy for BatchSpender {
             payment_obligation_ids.push(po.id);
         }
         vec![Action::BatchSpend(payment_obligation_ids)]
-    }
-
-    fn clone_box(&self) -> Box<dyn Strategy> {
-        Box::new(self.clone())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PayjoinStrategy;
-
-impl Strategy for PayjoinStrategy {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
-        if state.payment_obligations.is_empty() {
-            return vec![Action::Wait];
-        }
-        let mut actions = vec![];
-        for po in state.payment_obligations.iter() {
-            // TODO: some payment obligations may not be suitable for payjoin. i.e if the receiver opts out
-            actions.push(Action::InitiatePayjoin(po.id));
-        }
-
-        // Check for messages from other wallets
-        for (message_id, bulletin_board_id, payjoin_proposal) in state.payjoin_proposals.iter() {
-            // We should evaluate responding using all payment obligations that have not been handled
-            for po in state.payment_obligations.iter() {
-                actions.push(Action::RespondToPayjoin(
-                    payjoin_proposal.clone(),
-                    po.id,
-                    *bulletin_board_id,
-                    *message_id,
-                ));
-            }
-        }
-
-        actions
     }
 
     fn clone_box(&self) -> Box<dyn Strategy> {
@@ -666,9 +541,9 @@ impl Clone for Box<dyn Strategy> {
 // TODO: this should be a trait once we have different scoring strategies
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompositeScorer {
-    /// Weight applied to fee savings in sats from payjoin transactions
+    /// Weight applied to fee savings in sats
     pub(crate) fee_savings_weight: f64,
-    /// Weight applied to privacy utility from payjoin transactions
+    /// Weight applied to privacy utility
     pub(crate) privacy_weight: f64,
     /// Weight applied to deadline urgency for payment obligations
     pub(crate) payment_obligation_weight: f64,
@@ -684,7 +559,6 @@ impl CompositeScorer {
     ) -> ActionCost {
         let events = simulate_one_action(wallet_handle, action);
         // For now each action should only result in one event or none if we are waiting
-        // TODO: wallets should evaluate waiting and reduce its cost if they are expecting payments from payjoin compatible wallets
         debug_assert!(events.len() <= 1);
         let mut cost = ActionCost(INHERENT_ACTION_COST);
         for event in events {
@@ -693,12 +567,6 @@ impl CompositeScorer {
                     for outcome in outcomes.iter() {
                         cost = cost + outcome.cost(self.payment_obligation_weight);
                     }
-                }
-                PredictedOutcome::InitiatePayjoin(event) => {
-                    cost = cost + event.cost(self.privacy_weight);
-                }
-                PredictedOutcome::RespondToPayjoin(event) => {
-                    cost = cost + event.cost();
                 }
                 PredictedOutcome::InitiateMultiPartyPayjoin(event) => {
                     cost = cost + event.cost();
@@ -724,7 +592,6 @@ pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
         "UnilateralSpender" => Ok(Box::new(UnilateralSpender)),
         "Consolidator" => Ok(Box::new(Consolidator)),
         "BatchSpender" => Ok(Box::new(BatchSpender)),
-        "PayjoinStrategy" => Ok(Box::new(PayjoinStrategy)),
         "MultipartyPayjoinInitiatorStrategy" => Ok(Box::new(MultipartyPayjoinInitiatorStrategy)),
         "MultipartyPayjoinParticipantStrategy" => {
             Ok(Box::new(MultipartyPayjoinParticipantStrategy))
@@ -737,22 +604,18 @@ pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{message::PayjoinProposal, wallet::PaymentObligationData, TimeStep};
+    use crate::{wallet::PaymentObligationData, TimeStep};
     use bitcoin::Amount;
 
-    // Helper to create a minimal WalletView for testing
     fn create_test_wallet_view(
         payment_obligations: Vec<PaymentObligationData>,
-        payjoin_proposals: Vec<(MessageId, BulletinBoardId, PayjoinProposal)>,
     ) -> WalletView {
         WalletView::new(
             payment_obligations,
-            payjoin_proposals,
             vec![],
             vec![],
             TimeStep(0),
             WalletId(0),
-            // TODO: populate utxos
             vec![],
         )
     }
@@ -768,7 +631,7 @@ mod tests {
             from: WalletId(0),
             to: WalletId(1),
         };
-        let view = create_test_wallet_view(vec![po], vec![]);
+        let view = create_test_wallet_view(vec![po]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -791,7 +654,6 @@ mod tests {
         };
         let view = WalletView::new(
             vec![po],
-            vec![],
             vec![],
             vec![],
             TimeStep(0),
@@ -829,7 +691,7 @@ mod tests {
             from: WalletId(0),
             to: WalletId(2),
         };
-        let view = create_test_wallet_view(vec![po1, po2], vec![]);
+        let view = create_test_wallet_view(vec![po1, po2]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -838,50 +700,6 @@ mod tests {
         assert!(actions
             .iter()
             .any(|a| matches!(a, Action::BatchSpend(ids) if ids.len() == 2)));
-    }
-
-    #[test]
-    fn test_payjoin_strategy() {
-        let strategy = PayjoinStrategy;
-        let po = PaymentObligationData {
-            id: PaymentObligationId(0),
-            deadline: TimeStep(100),
-            reveal_time: TimeStep(0),
-            amount: Amount::from_sat(1000),
-            from: WalletId(0),
-            to: WalletId(1),
-        };
-
-        // Test without proposals should only return InitiatePayjoin
-        let view = create_test_wallet_view(vec![po.clone()], vec![]);
-        let actions = strategy.enumerate_candidate_actions(&view);
-
-        assert_eq!(actions.len(), 1);
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, Action::InitiatePayjoin(_))));
-
-        // Test with proposals should return both InitiatePayjoin and RespondToPayjoin
-        let proposal = PayjoinProposal {
-            tx: crate::transaction::TxData {
-                inputs: vec![],
-                outputs: vec![],
-            },
-            valid_till: TimeStep(200),
-        };
-
-        let view =
-            create_test_wallet_view(vec![po], vec![(MessageId(0), BulletinBoardId(0), proposal)]);
-
-        let actions = strategy.enumerate_candidate_actions(&view);
-
-        assert_eq!(actions.len(), 2);
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, Action::InitiatePayjoin(_))));
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, Action::RespondToPayjoin(_, _, _, _))));
     }
 
     #[test]
@@ -906,7 +724,7 @@ mod tests {
             from: WalletId(0),
             to: WalletId(2),
         };
-        let view = create_test_wallet_view(vec![po1, po2], vec![]);
+        let view = create_test_wallet_view(vec![po1, po2]);
 
         let actions = composite.enumerate_candidate_actions(&view);
 
@@ -949,7 +767,7 @@ mod tests {
             from: WalletId(0),
             to: WalletId(1), // Same receiver
         };
-        let view = create_test_wallet_view(vec![po1, po2], vec![]);
+        let view = create_test_wallet_view(vec![po1, po2]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -979,7 +797,7 @@ mod tests {
             from: WalletId(0),
             to: WalletId(2), // Receiver 2 (different)
         };
-        let view = create_test_wallet_view(vec![po1, po2], vec![]);
+        let view = create_test_wallet_view(vec![po1, po2]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -1002,14 +820,12 @@ mod tests {
             to: WalletId(2),
         };
 
-        // Create view with wallet_id = 1 (not 0)
         let view = WalletView::new(
             vec![po],
             vec![],
             vec![],
-            vec![],
             TimeStep(0),
-            WalletId(1), // Wallet 1, not 0
+            WalletId(1),
             vec![],
         );
 
@@ -1033,10 +849,8 @@ mod tests {
             to: WalletId(1),
         };
 
-        // Create view with a new multi-party payjoin invitation
         let view = WalletView::new(
             vec![po],
-            vec![],
             vec![(BulletinBoardId(0), MessageId(0))], // New invitation
             vec![],                                   // No active sessions yet
             TimeStep(0),
@@ -1065,10 +879,8 @@ mod tests {
             to: WalletId(1),
         };
 
-        // Create view with an active session
         let view = WalletView::new(
             vec![po],
-            vec![],
             vec![],
             vec![BulletinBoardId(0)], // Active session
             TimeStep(0),
@@ -1100,7 +912,6 @@ mod tests {
         // With both a new invitation and active session, strategy should continue active session.
         let view = WalletView::new(
             vec![po],
-            vec![],
             vec![(BulletinBoardId(0), MessageId(0))],
             vec![BulletinBoardId(1)],
             TimeStep(0),

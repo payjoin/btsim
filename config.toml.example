@@ -4,10 +4,10 @@ max_timestep = 10
 num_payment_obligations = 15
 
 [[wallet_types]]
-name = "Payjoiner"
+name = "default"
 count = 3
 script_type = "p2tr"
-strategies = ["UnilateralSpender", "PayjoinStrategy"]
+strategies = ["UnilateralSpender", "BatchSpender"]
 [wallet_types.scorer]
 fee_savings_weight = 1.0
 privacy_weight = 2.0
