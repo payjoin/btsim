@@ -68,6 +68,7 @@ impl PrngFactory {
 // TODO use bitcoin::transaction::predict_weight(inputs: IntoIter<InputWeightPrediction>, output_lengths: IntoIter<u64>)
 
 // all have RBF and non-RBF variants?
+#[derive(Debug)]
 enum CoinSelectionStrategy {
     FIFO,
     SpendAll,
@@ -1117,7 +1118,10 @@ mod tests {
             .with_mut(&mut sim)
             .new_tx(|tx, sim| {
                 // TODO use select_coins
-                let (inputs, drain) = alice.with(&sim).select_coins(target, long_term_feerate);
+                let (inputs, drain) =
+                    alice
+                        .with(&sim)
+                        .select_coins(target, long_term_feerate, false);
 
                 tx.inputs = inputs
                     .map(|o| Input {
