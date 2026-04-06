@@ -9,13 +9,13 @@ use crate::{
         MultiPartyPayjoinSession, SentBulletinBoardId, SentInputs, SentOutputs, SentReadyToSign,
         TxConstructionState,
     },
-    Simulation, TimeStep,
+    CoinSelectionStrategy, Simulation, TimeStep,
 };
 use bdk_coin_select::{
     metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, Drain, DrainWeights, Target,
     TargetFee, TargetOutputs, TR_DUST_RELAY_MIN_VALUE,
 };
-use bitcoin::{transaction::predict_weight, transaction::InputWeightPrediction, Amount};
+use bitcoin::{transaction::InputWeightPrediction, Amount};
 use im::{HashMap, OrdSet, Vector};
 use log::{info, warn};
 
@@ -83,6 +83,7 @@ impl<'a> WalletHandle<'a> {
         &self,
         target: Target,
         long_term_feerate: bitcoin::FeeRate,
+        select_all: bool,
     ) -> (impl Iterator<Item = OutputHandle<'a>>, Drain) {
         // TODO change
         // TODO group by address
@@ -99,6 +100,9 @@ impl<'a> WalletHandle<'a> {
             .collect();
 
         let mut coin_selector = CoinSelector::new(&candidates);
+        if select_all {
+            coin_selector.select_all();
+        }
         let drain_weights = DrainWeights::default();
 
         let dust_limit = TR_DUST_RELAY_MIN_VALUE;
@@ -190,6 +194,7 @@ impl<'a> WalletHandleMut<'a> {
         &mut self,
         payment_obligation_ids: &[PaymentObligationId],
         change_addr: &AddressId,
+        select_all: bool,
     ) -> TxData {
         let mut amount_and_destination = vec![];
         for payment_obligation_id in payment_obligation_ids.iter() {
@@ -226,7 +231,9 @@ impl<'a> WalletHandleMut<'a> {
         };
         let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).expect("valid fee rate");
 
-        let (selected_coins, drain) = self.handle().select_coins(target, long_term_feerate);
+        let (selected_coins, drain) =
+            self.handle()
+                .select_coins(target, long_term_feerate, select_all);
         let mut tx = TxData::default();
         let mut outputs = vec![];
         for (amount, address_id) in amount_and_destination.iter() {
@@ -261,7 +268,7 @@ impl<'a> WalletHandleMut<'a> {
             );
         }
         let change_addr = self.new_address();
-        let tx_template = self.construct_transaction_template(po_ids, &change_addr);
+        let tx_template = self.construct_transaction_template(po_ids, &change_addr, false);
         let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
 
         session.send_inputs();
@@ -450,7 +457,7 @@ impl<'a> WalletHandleMut<'a> {
         // TODO: change should be decomposed.
         let change_addr = self.new_address();
         // TODO: should you try to construct with other utxos than the ones bnb picks out?
-        let tx_template = self.construct_transaction_template(po_ids, &change_addr);
+        let tx_template = self.construct_transaction_template(po_ids, &change_addr, false);
         let orderbook_utxos = self.sim.get_orderbook_utxos();
         let candidates = generate_candidates(
             &orderbook_utxos,
@@ -467,7 +474,7 @@ impl<'a> WalletHandleMut<'a> {
 
         // If no candidates, fall back to a plain batch spend
         if candidates.is_empty() {
-            self.handle_payment_obligations(po_ids);
+            self.handle_payment_obligations(po_ids, false);
             return;
         }
 
@@ -523,15 +530,11 @@ impl<'a> WalletHandleMut<'a> {
         match action {
             Action::Wait => {}
             // TODO: the next 3 actions can be folded into one spend action, param'd off # of po's and coin selection strategy. All of them are unilateral
-            Action::UnilateralSpend(po) => {
-                self.handle_payment_obligations(&[*po]);
-            }
-            Action::BatchSpend(po_ids) => {
-                self.handle_payment_obligations(po_ids);
-            }
-            Action::ConsolidateSelf(payment_obligation_id) => {
-                // TODO: this should be folded into batch spend.
-                self.consolidate_self(payment_obligation_id);
+            Action::UnilateralPayments(po_ids, coin_selection_strategy) => {
+                self.handle_payment_obligations(
+                    po_ids,
+                    matches!(coin_selection_strategy, CoinSelectionStrategy::SpendAll),
+                );
             }
             Action::AcceptCospendProposal((
                 message_id,
@@ -540,8 +543,11 @@ impl<'a> WalletHandleMut<'a> {
             )) => {
                 // Create new session -- assuming this doesnt exist already
                 let change_addr = self.new_address();
-                let tx_template =
-                    self.construct_transaction_template(&[*payment_obligation_id], &change_addr);
+                let tx_template = self.construct_transaction_template(
+                    &[*payment_obligation_id],
+                    &change_addr,
+                    false,
+                );
                 self.info_mut().active_multi_party_payjoins.insert(
                     *bulletin_board_id,
                     MultiPartyPayjoinSession {
@@ -584,84 +590,22 @@ impl<'a> WalletHandleMut<'a> {
         self.do_action(&action);
     }
 
-    fn handle_payment_obligations(&'a mut self, payment_obligation_ids: &[PaymentObligationId]) {
+    fn handle_payment_obligations(
+        &'a mut self,
+        payment_obligation_ids: &[PaymentObligationId],
+        select_all_utxos: bool,
+    ) {
         let change_addr = self.new_address();
-        let tx_template = self.construct_transaction_template(payment_obligation_ids, &change_addr);
+        let tx_template = self.construct_transaction_template(
+            payment_obligation_ids,
+            &change_addr,
+            select_all_utxos,
+        );
         let tx_id = self.spend_tx(tx_template);
         self.info_mut()
             .txid_to_payment_obligation_ids
             .insert(tx_id, payment_obligation_ids.to_vec());
         self.broadcast(vec![tx_id]);
-    }
-
-    fn consolidate_self(&'a mut self, payment_obligation_id: &PaymentObligationId) {
-        let outpoints = self
-            .handle()
-            .unspent_coins()
-            .map(|o| o.outpoint())
-            .collect::<Vec<_>>();
-
-        if outpoints.len() <= 1 {
-            return;
-        }
-
-        let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
-        let total_input: Amount = outpoints
-            .iter()
-            .map(|outpoint| OutputHandle::new(self.sim, *outpoint).data().amount)
-            .sum();
-
-        let payment_output_script_len = payment_obligation
-            .to
-            .with(self.sim)
-            .data()
-            .script_type
-            .output_script_len();
-        let change_output_script_len = self.data().script_type.output_script_len();
-        let weight = predict_weight(
-            outpoints.iter().map(|outpoint| {
-                InputWeightPrediction::from(OutputHandle::new(self.sim, *outpoint))
-            }),
-            [payment_output_script_len, change_output_script_len],
-        );
-        let fee_rate_sat_per_vb = 1u64;
-        let vbytes = (weight.to_wu() + 3) / 4;
-        let fee_sat = vbytes.saturating_mul(fee_rate_sat_per_vb);
-
-        if total_input.to_sat() <= payment_obligation.amount.to_sat() + fee_sat {
-            return;
-        }
-
-        let change_value = total_input.to_sat() - payment_obligation.amount.to_sat() - fee_sat;
-        if change_value < TR_DUST_RELAY_MIN_VALUE {
-            return;
-        }
-
-        let destination = self.new_address();
-        let payment_address = payment_obligation.to.with_mut(self.sim).new_address();
-        let mut tx = TxData::default();
-        tx.inputs = outpoints
-            .iter()
-            .map(|outpoint| Input {
-                outpoint: *outpoint,
-            })
-            .collect();
-        tx.outputs = vec![
-            Output {
-                amount: payment_obligation.amount,
-                address_id: payment_address,
-            },
-            Output {
-                amount: Amount::from_sat(change_value),
-                address_id: destination,
-            },
-        ];
-
-        let tx_id = self.spend_tx(tx);
-        self.info_mut()
-            .txid_to_payment_obligation_ids
-            .insert(tx_id, vec![*payment_obligation_id]);
-        self.broadcast(std::iter::once(tx_id));
     }
 
     // TODO: refactor this? Do we event need this?

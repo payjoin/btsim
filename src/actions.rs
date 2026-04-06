@@ -6,9 +6,10 @@ use crate::{
     bulletin_board::BulletinBoardId,
     cospend::UtxoWithAmount,
     message::MessageId,
-    transaction::{Outpoint, TxId},
+    transaction::Outpoint,
+    tx_contruction::TxConstructionState,
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
-    Simulation, TimeStep,
+    CoinSelectionStrategy, Simulation, TimeStep,
 };
 
 fn piecewise_linear(x: f64, points: &[(f64, f64)]) -> f64 {
@@ -42,11 +43,7 @@ fn piecewise_linear(x: f64, points: &[(f64, f64)]) -> f64 {
 #[derive(Debug)]
 pub(crate) enum Action {
     /// Spend a payment obligation unilaterally
-    UnilateralSpend(PaymentObligationId),
-    /// Batch spend multiple payment obligations
-    BatchSpend(Vec<PaymentObligationId>),
-    /// Pay a payment obligation while consolidating all UTXOs into change
-    ConsolidateSelf(PaymentObligationId),
+    UnilateralPayments(Vec<PaymentObligationId>, CoinSelectionStrategy),
     /// Participate in Multiparty payjoin
     AcceptCospendProposal((MessageId, BulletinBoardId, PaymentObligationId)),
     /// Continue to participate in a multi-party payjoin
@@ -59,114 +56,58 @@ pub(crate) enum Action {
     Wait,
 }
 
-/// Hypothetical outcomes of an action
-#[derive(Debug)]
-pub(crate) enum PredictedOutcome {
-    PaymentObligationsHandled(Vec<PaymentObligationHandledOutcome>),
-    AcceptCospendProposal(AcceptCospendOutcome),
-    CreateCospendProposal(CreateCospendProposalOutcome),
-    Consolidation(ConsolidationOutcome),
-    RegisterInput(RegisterInputOutcome),
+/// Predicted diff of wallet state resulting from taking an action.
+/// Each field corresponds to one category of state change.
+#[derive(Debug, Default)]
+pub(crate) struct PredictedOutcome {
+    /// Payment obligations fulfilled by this action
+    pub(crate) payment_obligations_handled: Vec<PaymentObligationId>,
+    /// Payment obligations missed/abandoned
+    pub(crate) payment_obligations_abandoned: Vec<PaymentObligationId>,
+    /// UTXOs consumed as inputs
+    pub(crate) utxos_spent: Vec<Outpoint>,
+    /// Outpoints of outputs created. TODO: and what feerate interval they were created in?
+    pub(crate) outputs_created: Vec<Outpoint>,
+    /// UTXOs newly published on the order book
+    pub(crate) order_book_registrations: Vec<Outpoint>,
+    /// Cospend sessions joined as maker
+    pub(crate) cospend_proposals_accepted: Vec<BulletinBoardId>,
+    /// Session state machine transitions
+    pub(crate) session_state_updates: Vec<(BulletinBoardId, TxConstructionState)>,
 }
 
-#[derive(Debug)]
-pub(crate) struct PaymentObligationHandledOutcome {
-    /// Base cost: fee_paid + amount handled. In sats
-    base_cost: f64,
-    /// Time left on the payment obligation
-    time_left: i32,
-}
-
-impl PaymentObligationHandledOutcome {
-    fn cost(&self, payment_obligation_weight: f64) -> ActionCost {
-        // TODO: include fee rate
-        let points = [
-            (0.0, 2.0 * payment_obligation_weight),
-            (2.0, payment_obligation_weight),
-            (5.0, 0.0), // There may be other oppurtunities if waited a longer
-        ];
-        let utility = piecewise_linear(self.time_left as f64, &points); // Also in denominated in sats.
-        let cost = self.base_cost - utility;
-        debug!("PaymentObligationHandledEvent cost: {:?}", cost);
-        ActionCost(cost)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ParticipateMultiPartyPayjoinOutcome {
-    /// Time left on the payment obligation
-    time_left: i32,
-    /// Base cost: fee_paid + amount handled. In sats
-    base_cost: f64,
-}
-
-#[derive(Debug)]
-// TODO: model the participation utility as a linear function of the progression of the session
-pub(crate) struct AcceptCospendOutcome;
-
-impl AcceptCospendOutcome {
-    fn cost(&self) -> ActionCost {
-        // TODO: model the participation utility as a linear function of the oppurtunity cost of participating in other cospends
-        // The payoff assigned to participating
-        // And the deadline for the payment obligation that this maker may have
-        // For now this costs nothing as testing scaffolding.
-        ActionCost(0.0)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ConsolidationOutcome {
-    /// Base cost: fee_paid in sats.
-    #[allow(dead_code)]
-    base_cost: f64,
-}
-
-impl ConsolidationOutcome {
-    fn cost(&self) -> ActionCost {
-        debug!("ConsolidationEvent cost: 0");
-        ActionCost(0.0)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct CreateCospendProposalOutcome {
-    /// Time left on the earliest-deadline payment obligation
-    time_left: i32,
-    /// Base cost: fee_paid + total amount handled. In sats
-    base_cost: f64,
-}
-
-impl CreateCospendProposalOutcome {
-    fn cost(&self, privacy_weight: f64) -> ActionCost {
-        // Similar shape to InitiatePayjoinOutcome -- creating a proposal is
-        // speculative, so the utility increases with time remaining.
-        let points = [
-            (0.0, 0.0),
-            (2.0, privacy_weight),
-            (5.0, 5.0 * privacy_weight),
-        ];
-        let utility = piecewise_linear(self.time_left as f64, &points);
-        ActionCost(self.base_cost - utility)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct RegisterInputOutcome {
-    /// Number of payment obligations the wallet currently has
-    num_payment_obligations: usize,
-    /// Number of inputs already registered (including this one)
-    num_registered_inputs: usize,
-}
-
-impl RegisterInputOutcome {
-    fn cost(&self, coordination_weight: f64) -> ActionCost {
-        // More payment obligations = higher cost (wallet should be spending, not registering)
-        // TODO: this should be the cost of missing those payments bc we dont have enought inputs to spend
-        let obligation_pressure = self.num_payment_obligations as f64 * coordination_weight;
-        // Registering additional inputs is increasingly costly
-        let multi_registration_cost =
-            (self.num_registered_inputs as f64).powi(2) * coordination_weight;
-        ActionCost(obligation_pressure + multi_registration_cost)
+impl PredictedOutcome {
+    pub(crate) fn cost(
+        &self,
+        scorer: &CompositeScorer,
+        sim: &Simulation,
+        current_timestep: TimeStep,
+    ) -> ActionCost {
+        let mut cost = ActionCost(INHERENT_ACTION_COST);
+        for po_id in &self.payment_obligations_handled {
+            let po = po_id.with(sim).data();
+            let time_left = po.deadline.0 as i32 - current_timestep.0 as i32;
+            // Utility of 2*weight at deadline easily
+            // exceeds the base cost, making near-deadline payments cheaper than waiting.
+            let base_cost = po.amount.to_float_in(bitcoin::Denomination::Bitcoin);
+            let points = [
+                (0.0, 2.0 * scorer.payment_obligation_weight),
+                (2.0, scorer.payment_obligation_weight),
+                (5.0, 0.0),
+            ];
+            let utility = piecewise_linear(time_left as f64, &points);
+            debug!(
+                "PaymentObligationHandled cost: base={} utility={}",
+                base_cost, utility
+            );
+            cost = cost + ActionCost(base_cost - utility);
+        }
+        // TODO: cost from payment_obligations_abandoned (missed deadline penalty)
+        // TODO: cost from utxos_spent (UTXO fragmentation / privacy loss)
+        // TODO: cost from outputs_created (fee rate efficiency)
+        // TODO: cost from order_book_registrations (coordination value)
+        // TODO: cost from cospend_proposals_accepted / session_state_updates (privacy gain)
+        cost
     }
 }
 
@@ -177,6 +118,7 @@ pub(crate) struct WalletView {
     active_cospends: Vec<BulletinBoardId>,
     cospend_proposals: Vec<(BulletinBoardId, MessageId)>,
     current_timestep: TimeStep,
+    // TODO: can we remove this?
     wallet_id: WalletId,
     utxos: Vec<UtxoWithAmount>,
     registered_inputs: Vec<Outpoint>,
@@ -203,135 +145,83 @@ impl WalletView {
         }
     }
 }
-fn get_payment_obligation_handled_outcome(
-    payment_obligation_id: &PaymentObligationId,
-    sim: &Simulation,
-    current_timestep: TimeStep,
-    fee_paid: f64,
-) -> PaymentObligationHandledOutcome {
-    let payment_obligation = payment_obligation_id.with(&sim).data();
-    let deadline = payment_obligation.deadline;
-    PaymentObligationHandledOutcome {
-        base_cost: fee_paid
-            + payment_obligation
-                .amount
-                .to_float_in(bitcoin::Denomination::Satoshi),
-        time_left: deadline.0 as i32 - current_timestep.0 as i32,
-    }
-}
-
-fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<PredictedOutcome> {
-    let wallet_view = wallet_handle.wallet_view();
-    let mut events = vec![];
+fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> PredictedOutcome {
     let old_info = wallet_handle.info().clone();
 
-    // Deep clone the simulation and run the action
     let wallet_id = wallet_handle.data().id;
     let mut sim = wallet_handle.sim.clone();
-    let mut new_wallet_handle = wallet_handle.data().id.with_mut(&mut sim);
-    new_wallet_handle.do_action(action);
-    let new_wallet_handle = wallet_id.with(&sim);
-    let new_info = new_wallet_handle.info();
-    let fee_paid_total = action_fee_paid_sats(&old_info, new_info, &sim);
+    wallet_id.with_mut(&mut sim).do_action(action);
+    let new_info = wallet_id.with(&sim).info().clone();
 
-    if let Action::UnilateralSpend(payment_obligation_id) = action {
-        let payment_obligation = payment_obligation_id.with(&sim).data();
-        let deadline = payment_obligation.deadline;
-        events.push(PredictedOutcome::PaymentObligationsHandled(vec![
-            PaymentObligationHandledOutcome {
-                base_cost: fee_paid_total
-                    + payment_obligation
-                        .amount
-                        .to_float_in(bitcoin::Denomination::Satoshi),
-                time_left: deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
-            },
-        ]));
-    }
+    // POs handled: derived from action since confirmation is deferred to block
+    let payment_obligations_handled: Vec<PaymentObligationId> = match action {
+        Action::UnilateralPayments(po_ids, _) => po_ids.clone(),
+        Action::CreateCospendProposal(po_ids) => po_ids.clone(),
+        Action::AcceptCospendProposal((_, _, po_id)) => vec![*po_id],
+        _ => vec![],
+    };
 
-    if let Action::BatchSpend(payment_obligation_ids) = action {
-        let mut outcomes = vec![];
-        let total_amount_handled: f64 = payment_obligation_ids
-            .iter()
-            .map(|payment_obligation_id| {
-                payment_obligation_id
-                    .with(&sim)
-                    .data()
-                    .amount
-                    .to_float_in(bitcoin::Denomination::Satoshi)
-            })
-            .sum();
-        for payment_obligation_id in payment_obligation_ids.iter() {
-            let amount_handled = payment_obligation_id
-                .with(&sim)
-                .data()
-                .amount
-                .to_float_in(bitcoin::Denomination::Satoshi);
-            let fee_paid = if total_amount_handled > 0.0 {
-                fee_paid_total * (amount_handled / total_amount_handled)
-            } else {
-                0.0
-            };
-            outcomes.push(get_payment_obligation_handled_outcome(
-                payment_obligation_id,
-                &sim,
-                wallet_view.current_timestep,
-                fee_paid,
-            ));
-        }
-        events.push(PredictedOutcome::PaymentObligationsHandled(outcomes));
-    }
-
-    if matches!(action, Action::ConsolidateSelf(_)) {
-        events.push(PredictedOutcome::Consolidation(ConsolidationOutcome {
-            base_cost: fee_paid_total,
-        }));
-    }
-
-    if let Action::CreateCospendProposal(po_ids) = action {
-        let earliest_deadline = po_ids
-            .iter()
-            .map(|id| {
-                id.with(&sim).data().deadline.0 as i32 - wallet_view.current_timestep.0 as i32
-            })
-            .min()
-            .unwrap_or(0);
-        events.push(PredictedOutcome::CreateCospendProposal(
-            CreateCospendProposalOutcome {
-                time_left: earliest_deadline,
-                base_cost: fee_paid_total,
-            },
-        ));
-    }
-
-    if let Action::AcceptCospendProposal((_, _, _)) = action {
-        events.push(PredictedOutcome::AcceptCospendProposal(
-            AcceptCospendOutcome,
-        ));
-    }
-
-    if matches!(action, Action::RegisterInput(_)) {
-        let num_registered = wallet_view.registered_inputs.len() + 1;
-        events.push(PredictedOutcome::RegisterInput(RegisterInputOutcome {
-            num_payment_obligations: wallet_view.payment_obligations.len(),
-            num_registered_inputs: num_registered,
-        }));
-    }
-
-    events
-}
-
-fn action_fee_paid_sats(
-    old_info: &crate::wallet::WalletInfo,
-    new_info: &crate::wallet::WalletInfo,
-    sim: &Simulation,
-) -> f64 {
-    let old_txs: HashSet<TxId> = old_info.broadcast_transactions.iter().copied().collect();
-    new_info
-        .broadcast_transactions
+    // UTXOs spent: new entries in unconfirmed_spends
+    let utxos_spent: Vec<Outpoint> = new_info
+        .unconfirmed_spends
         .iter()
-        .filter(|txid| !old_txs.contains(txid))
-        .map(|txid| txid.with(sim).info().fee.to_sat() as f64)
-        .sum()
+        .filter(|op| !old_info.unconfirmed_spends.contains(op))
+        .copied()
+        .collect();
+
+    // Outputs created: new entries in unconfirmed_txos
+    let outputs_created: Vec<Outpoint> = new_info
+        .unconfirmed_txos
+        .iter()
+        .filter(|op| !old_info.unconfirmed_txos.contains(op))
+        .copied()
+        .collect();
+
+    // Order book registrations: new entries in registered_inputs
+    let order_book_registrations: Vec<Outpoint> = new_info
+        .registered_inputs
+        .iter()
+        .filter(|op| !old_info.registered_inputs.contains(op))
+        .copied()
+        .collect();
+
+    // Cospend proposals accepted: new sessions where this wallet is a maker
+    let cospend_proposals_accepted: Vec<BulletinBoardId> = new_info
+        .active_multi_party_payjoins
+        .iter()
+        .filter(|(bb, session)| {
+            !old_info.active_multi_party_payjoins.contains_key(bb) && !session.is_initiator
+        })
+        .map(|(bb, _)| *bb)
+        .collect();
+
+    // Session state transitions: boards present in both old and new with a different state
+    let session_state_updates: Vec<(BulletinBoardId, TxConstructionState)> = new_info
+        .active_multi_party_payjoins
+        .iter()
+        .filter_map(|(bb, new_session)| {
+            old_info
+                .active_multi_party_payjoins
+                .get(bb)
+                .and_then(|old_session| {
+                    if old_session.state != new_session.state {
+                        Some((*bb, new_session.state.clone()))
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+
+    PredictedOutcome {
+        payment_obligations_handled,
+        payment_obligations_abandoned: vec![],
+        utxos_spent,
+        outputs_created,
+        order_book_registrations,
+        cospend_proposals_accepted,
+        session_state_updates,
+    }
 }
 
 /// Strategies will pick one action to minimize their cost
@@ -381,10 +271,11 @@ impl Strategy for UnilateralSpender {
         }
         let mut actions = vec![];
         for po in state.payment_obligations.iter() {
-            // For every payment obligation, we can spend it unilaterally
-            actions.push(Action::UnilateralSpend(po.id));
+            actions.push(Action::UnilateralPayments(
+                vec![po.id],
+                CoinSelectionStrategy::BNB,
+            ));
         }
-
         actions
     }
 
@@ -397,11 +288,15 @@ impl Strategy for UnilateralSpender {
 pub(crate) struct Consolidator;
 
 impl Strategy for Consolidator {
+    /// Always uses SpendAll when paying.
+    /// trade-off. Fee savings from reducing UTXO fragmentation are captured when fee_savings_weight > 0.
     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
         let mut actions = Vec::new();
         for po in state.payment_obligations.iter() {
-            actions.push(Action::UnilateralSpend(po.id));
-            actions.push(Action::ConsolidateSelf(po.id));
+            actions.push(Action::UnilateralPayments(
+                vec![po.id],
+                CoinSelectionStrategy::SpendAll,
+            ));
         }
         actions.push(Action::Wait);
         actions
@@ -420,13 +315,13 @@ impl Strategy for BatchSpender {
         if state.payment_obligations.is_empty() {
             return vec![Action::Wait];
         }
-        // TODO: we may need to consider differnt partitioning strategies for the batch spend
-        // Maybe some partitions have higher utility if batched than others that have longer deadlines
-        let mut payment_obligation_ids: Vec<PaymentObligationId> = vec![];
-        for po in state.payment_obligations.iter() {
-            payment_obligation_ids.push(po.id);
-        }
-        vec![Action::BatchSpend(payment_obligation_ids)]
+        // TODO: we may need to consider different partitioning strategies for the batch spend
+        let payment_obligation_ids: Vec<PaymentObligationId> =
+            state.payment_obligations.iter().map(|po| po.id).collect();
+        vec![Action::UnilateralPayments(
+            payment_obligation_ids,
+            CoinSelectionStrategy::BNB,
+        )]
     }
 
     fn clone_box(&self) -> Box<dyn Strategy> {
@@ -559,32 +454,9 @@ impl CompositeScorer {
         action: &Action,
         wallet_handle: &WalletHandleMut,
     ) -> ActionCost {
-        let events = simulate_one_action(wallet_handle, action);
-        // For now each action should only result in one event or none if we are waiting
-        debug_assert!(events.len() <= 1);
-        let mut cost = ActionCost(INHERENT_ACTION_COST);
-        for event in events {
-            match event {
-                PredictedOutcome::PaymentObligationsHandled(outcomes) => {
-                    for outcome in outcomes.iter() {
-                        cost = cost + outcome.cost(self.payment_obligation_weight);
-                    }
-                }
-                PredictedOutcome::AcceptCospendProposal(event) => {
-                    cost = cost + event.cost();
-                }
-                PredictedOutcome::Consolidation(event) => {
-                    cost = cost + event.cost();
-                }
-                PredictedOutcome::CreateCospendProposal(event) => {
-                    cost = cost + event.cost(self.privacy_weight);
-                }
-                PredictedOutcome::RegisterInput(event) => {
-                    cost = cost + event.cost(self.coordination_weight);
-                }
-            }
-        }
-        cost
+        let current_timestep = wallet_handle.sim.current_timestep;
+        let outcome = simulate_one_action(wallet_handle, action);
+        outcome.cost(self, wallet_handle.sim, current_timestep)
     }
 }
 
@@ -636,7 +508,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::UnilateralSpend(_))));
+            .any(|a| matches!(a, Action::UnilateralPayments(ids, CoinSelectionStrategy::BNB) if ids.len() == 1)));
     }
 
     #[test]
@@ -662,13 +534,14 @@ mod tests {
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, Action::ConsolidateSelf(_))));
         assert!(actions.iter().any(|a| matches!(a, Action::Wait)));
+        // Consolidator always uses SpendAll (strategy commitment, not cost trade-off)
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::UnilateralSpend(_))));
+            .any(|a| matches!(a, Action::UnilateralPayments(ids, CoinSelectionStrategy::SpendAll) if ids.len() == 1)));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, Action::UnilateralPayments(_, CoinSelectionStrategy::BNB))));
     }
 
     #[test]
@@ -698,7 +571,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::BatchSpend(ids) if ids.len() == 2)));
+            .any(|a| matches!(a, Action::UnilateralPayments(ids, _) if ids.len() == 2)));
     }
 
     #[test]
@@ -728,19 +601,19 @@ mod tests {
         let actions = composite.enumerate_candidate_actions(&view);
 
         // Should include actions from both strategies
-        // UnilateralSpender: 2 actions (one per obligation)
-        // BatchSpender: 1 action (batch of both)
+        // UnilateralSpender: 2 actions (one per obligation, single-PO each)
+        // BatchSpender: 1 action (all obligations in one tx)
         assert_eq!(actions.len(), 3);
 
-        let unilateral_count = actions
+        let single_po_count = actions
             .iter()
-            .filter(|a| matches!(a, Action::UnilateralSpend(_)))
+            .filter(|a| matches!(a, Action::UnilateralPayments(ids, CoinSelectionStrategy::BNB) if ids.len() == 1))
             .count();
-        assert_eq!(unilateral_count, 2);
+        assert_eq!(single_po_count, 2);
 
         let batch_count = actions
             .iter()
-            .filter(|a| matches!(a, Action::BatchSpend(_)))
+            .filter(|a| matches!(a, Action::UnilateralPayments(ids, _) if ids.len() == 2))
             .count();
         assert_eq!(batch_count, 1);
     }
