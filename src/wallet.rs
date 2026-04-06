@@ -255,36 +255,6 @@ impl<'a> WalletHandleMut<'a> {
         tx
     }
 
-    fn create_multi_party_payjoin_session(&mut self, po_ids: &[PaymentObligationId]) {
-        // First we create the bulletin board
-        let bulletin_board_id = self.sim.create_bulletin_board();
-        // Then we invite all members to join
-        for po_id in po_ids.iter() {
-            let recv = po_id.with(self.sim).data().to;
-            self.sim.broadcast_message(
-                recv,
-                self.id,
-                MessageType::InitiateMultiPartyPayjoin(bulletin_board_id),
-            );
-        }
-        let change_addr = self.new_address();
-        let tx_template = self.construct_transaction_template(po_ids, &change_addr, false);
-        let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
-
-        session.send_inputs();
-        info!("Sent inputs for multi party payjoin session");
-
-        let session = MultiPartyPayjoinSession {
-            payment_obligation_ids: po_ids.to_owned(),
-            tx_template,
-            state: TxConstructionState::SentInputs,
-            is_initiator: true,
-        };
-        self.info_mut()
-            .active_multi_party_payjoins
-            .insert(bulletin_board_id, session);
-    }
-
     fn participate_in_multi_party_payjoin(&mut self, bulletin_board_id: &BulletinBoardId) {
         let session = self
             .info()
