@@ -414,8 +414,6 @@ impl<'a> WalletHandleMut<'a> {
             payment_obligations,
             new_multi_party_payjoins,
             active_mp_pj_sessions,
-            self.sim.current_timestep,
-            self.id,
             utxos,
             registered_inputs,
         )

@@ -117,9 +117,6 @@ pub(crate) struct WalletView {
     payment_obligations: Vec<PaymentObligationData>,
     active_cospends: Vec<BulletinBoardId>,
     cospend_proposals: Vec<(BulletinBoardId, MessageId)>,
-    current_timestep: TimeStep,
-    // TODO: can we remove this?
-    wallet_id: WalletId,
     utxos: Vec<UtxoWithAmount>,
     registered_inputs: Vec<Outpoint>,
 }
@@ -129,8 +126,6 @@ impl WalletView {
         payment_obligations: Vec<PaymentObligationData>,
         cospend_proposals: Vec<(BulletinBoardId, MessageId)>,
         active_cospends: Vec<BulletinBoardId>,
-        current_timestep: TimeStep,
-        wallet_id: WalletId,
         utxos: Vec<UtxoWithAmount>,
         registered_inputs: Vec<Outpoint>,
     ) -> Self {
@@ -138,8 +133,6 @@ impl WalletView {
             payment_obligations,
             active_cospends,
             cospend_proposals,
-            current_timestep,
-            wallet_id,
             utxos,
             registered_inputs,
         }
@@ -479,15 +472,7 @@ mod tests {
     use bitcoin::Amount;
 
     fn create_test_wallet_view(payment_obligations: Vec<PaymentObligationData>) -> WalletView {
-        WalletView::new(
-            payment_obligations,
-            vec![],
-            vec![],
-            TimeStep(0),
-            WalletId(0),
-            vec![],
-            vec![],
-        )
+        WalletView::new(payment_obligations, vec![], vec![], vec![], vec![])
     }
 
     #[test]
@@ -522,15 +507,7 @@ mod tests {
             from: WalletId(0),
             to: WalletId(1),
         };
-        let view = WalletView::new(
-            vec![po],
-            vec![],
-            vec![],
-            TimeStep(0),
-            WalletId(0),
-            vec![],
-            vec![],
-        );
+        let view = WalletView::new(vec![po], vec![], vec![], vec![], vec![]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -728,8 +705,6 @@ mod tests {
             vec![po],
             vec![],
             vec![BulletinBoardId(0)], // Active session
-            TimeStep(0),
-            WalletId(0),
             vec![],
             vec![],
         );
@@ -759,8 +734,6 @@ mod tests {
             vec![po],
             vec![(BulletinBoardId(0), MessageId(0))], // New invitation
             vec![],                                   // No active sessions yet
-            TimeStep(0),
-            WalletId(1),
             vec![],
             vec![],
         );
@@ -790,8 +763,6 @@ mod tests {
             vec![po],
             vec![],
             vec![BulletinBoardId(0)], // Active session
-            TimeStep(0),
-            WalletId(1),
             vec![],
             vec![],
         );
@@ -822,8 +793,6 @@ mod tests {
             vec![po],
             vec![(BulletinBoardId(0), MessageId(0))],
             vec![BulletinBoardId(1)],
-            TimeStep(0),
-            WalletId(1),
             vec![],
             vec![],
         );
