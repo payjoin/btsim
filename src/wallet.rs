@@ -84,10 +84,17 @@ impl<'a> WalletHandle<'a> {
         target: Target,
         long_term_feerate: bitcoin::FeeRate,
         select_all: bool,
+        required_inputs: Option<&[Outpoint]>,
     ) -> (impl Iterator<Item = OutputHandle<'a>>, Drain) {
         // TODO change
         // TODO group by address
-        let utxos: Vec<OutputHandle<'a>> = self.unspent_coins().collect();
+        let utxos: Vec<OutputHandle<'a>> = match required_inputs {
+            Some(required) => self
+                .unspent_coins()
+                .filter(|o| required.contains(&o.outpoint()))
+                .collect(),
+            None => self.unspent_coins().collect(),
+        };
 
         let candidates: Vec<Candidate> = utxos
             .iter()
@@ -195,6 +202,7 @@ impl<'a> WalletHandleMut<'a> {
         payment_obligation_ids: &[PaymentObligationId],
         change_addr: &AddressId,
         select_all: bool,
+        required_inputs: Option<&[Outpoint]>,
     ) -> TxData {
         let mut amount_and_destination = vec![];
         for payment_obligation_id in payment_obligation_ids.iter() {
@@ -233,7 +241,7 @@ impl<'a> WalletHandleMut<'a> {
 
         let (selected_coins, drain) =
             self.handle()
-                .select_coins(target, long_term_feerate, select_all);
+                .select_coins(target, long_term_feerate, select_all, required_inputs);
         let mut tx = TxData::default();
         let mut outputs = vec![];
         for (amount, address_id) in amount_and_destination.iter() {
@@ -410,6 +418,7 @@ impl<'a> WalletHandleMut<'a> {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
+
         WalletView::new(
             payment_obligations,
             new_multi_party_payjoins,
@@ -425,7 +434,7 @@ impl<'a> WalletHandleMut<'a> {
         // TODO: change should be decomposed.
         let change_addr = self.new_address();
         // TODO: should you try to construct with other utxos than the ones bnb picks out?
-        let tx_template = self.construct_transaction_template(po_ids, &change_addr, false);
+        let tx_template = self.construct_transaction_template(po_ids, &change_addr, false, None);
         let orderbook_utxos = self.sim.get_orderbook_utxos();
         let candidates = generate_candidates(
             &orderbook_utxos,
@@ -511,10 +520,18 @@ impl<'a> WalletHandleMut<'a> {
             )) => {
                 // Create new session -- assuming this doesnt exist already
                 let change_addr = self.new_address();
+                // Use the UTXO we advertised on the order book; the taker selected us for it
+                let registered_input = self
+                    .info()
+                    .registered_inputs
+                    .iter()
+                    .find(|op| self.info().confirmed_utxos.contains(op))
+                    .copied();
                 let tx_template = self.construct_transaction_template(
                     &[*payment_obligation_id],
                     &change_addr,
                     false,
+                    registered_input.as_ref().map(std::slice::from_ref),
                 );
                 self.info_mut().active_multi_party_payjoins.insert(
                     *bulletin_board_id,
@@ -545,9 +562,12 @@ impl<'a> WalletHandleMut<'a> {
     pub(crate) fn wake_up(&'a mut self) {
         let scorer = &self.data().scorer;
         let wallet_view = self.wallet_view();
+        // Clone strategies to allow passing &self to enumerate_candidate_actions
+        // without conflicting with the borrow on strategies.strategies
+        let strategies = self.data().strategies.clone();
         let mut all_actions = Vec::new();
-        for strategy in self.data().strategies.strategies.iter() {
-            all_actions.extend(strategy.enumerate_candidate_actions(&wallet_view));
+        for strategy in strategies.strategies.iter() {
+            all_actions.extend(strategy.enumerate_candidate_actions(&wallet_view, self));
         }
 
         let action = all_actions
@@ -568,6 +588,7 @@ impl<'a> WalletHandleMut<'a> {
             payment_obligation_ids,
             &change_addr,
             select_all_utxos,
+            None,
         );
         let tx_id = self.spend_tx(tx_template);
         self.info_mut()

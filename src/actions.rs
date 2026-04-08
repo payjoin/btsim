@@ -8,7 +8,7 @@ use crate::{
     message::MessageId,
     transaction::Outpoint,
     tx_contruction::TxConstructionState,
-    wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
+    wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut},
     CoinSelectionStrategy, Simulation, TimeStep,
 };
 
@@ -220,7 +220,11 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Pred
 /// Strategies will pick one action to minimize their cost
 /// TODO: Strategies should be composible. They should enform the action decision space scoring and doing actions should be handling by something else that has composed multiple strategies.
 pub(crate) trait Strategy: std::fmt::Debug {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action>;
+    fn enumerate_candidate_actions(
+        &self,
+        state: &WalletView,
+        wallet: &WalletHandleMut,
+    ) -> Vec<Action>;
     fn clone_box(&self) -> Box<dyn Strategy>;
 }
 
@@ -258,7 +262,11 @@ pub(crate) struct UnilateralSpender;
 
 impl Strategy for UnilateralSpender {
     /// The decision space of the unilateral spender is the set of all payment obligations
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+    fn enumerate_candidate_actions(
+        &self,
+        state: &WalletView,
+        _wallet: &WalletHandleMut,
+    ) -> Vec<Action> {
         if state.payment_obligations.is_empty() {
             return vec![Action::Wait];
         }
@@ -283,7 +291,11 @@ pub(crate) struct Consolidator;
 impl Strategy for Consolidator {
     /// Always uses SpendAll when paying.
     /// trade-off. Fee savings from reducing UTXO fragmentation are captured when fee_savings_weight > 0.
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+    fn enumerate_candidate_actions(
+        &self,
+        state: &WalletView,
+        _wallet: &WalletHandleMut,
+    ) -> Vec<Action> {
         let mut actions = Vec::new();
         for po in state.payment_obligations.iter() {
             actions.push(Action::UnilateralPayments(
@@ -304,7 +316,11 @@ impl Strategy for Consolidator {
 pub(crate) struct BatchSpender;
 
 impl Strategy for BatchSpender {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+    fn enumerate_candidate_actions(
+        &self,
+        state: &WalletView,
+        _wallet: &WalletHandleMut,
+    ) -> Vec<Action> {
         if state.payment_obligations.is_empty() {
             return vec![Action::Wait];
         }
@@ -326,7 +342,11 @@ impl Strategy for BatchSpender {
 pub(crate) struct MakerStrategy;
 
 impl Strategy for MakerStrategy {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+    fn enumerate_candidate_actions(
+        &self,
+        state: &WalletView,
+        wallet: &WalletHandleMut,
+    ) -> Vec<Action> {
         let mut actions = vec![];
 
         // Continue to participate in active sessions
@@ -347,16 +367,43 @@ impl Strategy for MakerStrategy {
             }
         }
 
-        // Register unregistered UTXOs in the order book (one action per UTXO)
-        for utxo in state.utxos.iter() {
-            if !state.registered_inputs.contains(&utxo.outpoint) {
-                actions.push(Action::RegisterInput(utxo.outpoint));
+        // Only figure out what to register when there is nothing else to attend to.
+        // If there are active sessions or pending invitations, focus on those first.
+        // Find the common unilateral input: simulate each UnilateralSpender action, collect
+        // utxos_spent per outcome, and intersect. The resulting UTXO will be spent regardless,
+        // so advertising it on the order book is the best option.
+        let unilateral_actions =
+            if state.cospend_proposals.is_empty() && state.active_cospends.is_empty() {
+                UnilateralSpender.enumerate_candidate_actions(state, wallet)
+            } else {
+                vec![]
+            };
+        let per_action_spent: Vec<std::collections::HashSet<Outpoint>> = unilateral_actions
+            .iter()
+            .filter(|a| matches!(a, Action::UnilateralPayments(_, _)))
+            .map(|action| {
+                simulate_one_action(wallet, action)
+                    .utxos_spent
+                    .into_iter()
+                    .collect()
+            })
+            .collect();
+        let common_input: Option<Outpoint> = per_action_spent
+            .iter()
+            .skip(1)
+            .fold(
+                per_action_spent.first().cloned().unwrap_or_default(),
+                |acc, s| acc.intersection(s).copied().collect(),
+            )
+            .into_iter()
+            .next();
+        if let Some(outpoint) = common_input {
+            if !state.registered_inputs.contains(&outpoint) {
+                actions.push(Action::RegisterInput(outpoint));
             }
         }
 
-        // HACK: if are only action is to register another input, we should prefer to wait.
-        // In practice you should be able to register as many inputs as you want.
-        if actions.is_empty() || (actions.len() == 1 && matches!(actions[0], Action::Wait)) {
+        if actions.is_empty() {
             actions.push(Action::Wait);
         }
         actions
@@ -371,7 +418,11 @@ impl Strategy for MakerStrategy {
 pub(crate) struct TakerStrategy;
 
 impl Strategy for TakerStrategy {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+    fn enumerate_candidate_actions(
+        &self,
+        state: &WalletView,
+        _wallet: &WalletHandleMut,
+    ) -> Vec<Action> {
         if state.payment_obligations.is_empty() {
             return vec![Action::Wait];
         }
@@ -409,10 +460,14 @@ pub(crate) struct CompositeStrategy {
 }
 
 impl Strategy for CompositeStrategy {
-    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+    fn enumerate_candidate_actions(
+        &self,
+        state: &WalletView,
+        wallet: &WalletHandleMut,
+    ) -> Vec<Action> {
         let mut actions = vec![];
         for strategy in self.strategies.iter() {
-            actions.extend(strategy.enumerate_candidate_actions(state));
+            actions.extend(strategy.enumerate_candidate_actions(state, wallet));
         }
         actions
     }
@@ -468,15 +523,44 @@ pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{wallet::PaymentObligationData, TimeStep};
+    use crate::{wallet::{PaymentObligationData, WalletId}, TimeStep};
     use bitcoin::Amount;
 
     fn create_test_wallet_view(payment_obligations: Vec<PaymentObligationData>) -> WalletView {
         WalletView::new(payment_obligations, vec![], vec![], vec![], vec![])
     }
 
+    fn test_sim() -> crate::Simulation {
+        use crate::{
+            config::{ScorerConfig, WalletTypeConfig},
+            script_type::ScriptType,
+            SimulationBuilder,
+        };
+        SimulationBuilder::new(
+            42,
+            vec![WalletTypeConfig {
+                name: "test".to_string(),
+                count: 2,
+                strategies: vec!["UnilateralSpender".to_string()],
+                scorer: ScorerConfig {
+                    fee_savings_weight: 0.0,
+                    privacy_weight: 0.0,
+                    payment_obligation_weight: 0.0,
+                    coordination_weight: 0.0,
+                },
+                script_type: ScriptType::P2tr,
+            }],
+            10,
+            1,
+            0,
+        )
+        .build()
+    }
+
     #[test]
     fn test_unilateral_spender() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = UnilateralSpender;
         let po = PaymentObligationData {
             id: PaymentObligationId(0),
@@ -488,7 +572,7 @@ mod tests {
         };
         let view = create_test_wallet_view(vec![po]);
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         assert_eq!(actions.len(), 1);
         assert!(actions
@@ -498,6 +582,8 @@ mod tests {
 
     #[test]
     fn test_unilateral_consolidate_spender() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = Consolidator;
         let po = PaymentObligationData {
             id: PaymentObligationId(0),
@@ -509,7 +595,7 @@ mod tests {
         };
         let view = WalletView::new(vec![po], vec![], vec![], vec![], vec![]);
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         assert!(actions.iter().any(|a| matches!(a, Action::Wait)));
         // Consolidator always uses SpendAll (strategy commitment, not cost trade-off)
@@ -523,6 +609,8 @@ mod tests {
 
     #[test]
     fn test_batch_spender_creates_batches() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = BatchSpender;
         let po1 = PaymentObligationData {
             id: PaymentObligationId(0),
@@ -542,7 +630,7 @@ mod tests {
         };
         let view = create_test_wallet_view(vec![po1, po2]);
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         // BatchSpender creates a single batch with all obligations
         assert_eq!(actions.len(), 1);
@@ -553,6 +641,8 @@ mod tests {
 
     #[test]
     fn test_composite_strategy_combines_actions() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let composite = CompositeStrategy {
             strategies: vec![Box::new(UnilateralSpender), Box::new(BatchSpender)],
         };
@@ -575,7 +665,7 @@ mod tests {
         };
         let view = create_test_wallet_view(vec![po1, po2]);
 
-        let actions = composite.enumerate_candidate_actions(&view);
+        let actions = composite.enumerate_candidate_actions(&view, &wallet);
 
         // Should include actions from both strategies
         // UnilateralSpender: 2 actions (one per obligation, single-PO each)
@@ -597,6 +687,8 @@ mod tests {
 
     #[test]
     fn test_multiparty_initiator_with_insufficient_receivers() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = TakerStrategy;
 
         // Only 1 unique receiver - not enough for multi-party
@@ -618,7 +710,7 @@ mod tests {
         };
         let view = create_test_wallet_view(vec![po1, po2]);
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         // Should return Wait because we need at least 2 different receivers
         assert_eq!(actions.len(), 1);
@@ -627,6 +719,8 @@ mod tests {
 
     #[test]
     fn test_multiparty_initiator_with_multiple_receivers() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = TakerStrategy;
 
         // 2 different receivers - enough for multi-party
@@ -648,7 +742,7 @@ mod tests {
         };
         let view = create_test_wallet_view(vec![po1, po2]);
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         assert_eq!(actions.len(), 1);
         assert!(actions
@@ -658,6 +752,8 @@ mod tests {
 
     #[test]
     fn test_multiparty_initiator_only_wallet_0() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = TakerStrategy;
 
         let po1 = PaymentObligationData {
@@ -677,10 +773,9 @@ mod tests {
             to: WalletId(2),
         };
 
-        // Create view with wallet_id = 1 (not 0)
         let view = create_test_wallet_view(vec![po1, po2]);
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         assert_eq!(actions.len(), 1);
         assert!(actions
@@ -690,6 +785,8 @@ mod tests {
 
     #[test]
     fn test_taker_continues_active_session() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = TakerStrategy;
 
         let po = PaymentObligationData {
@@ -709,7 +806,7 @@ mod tests {
             vec![],
         );
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         assert_eq!(actions.len(), 1);
         assert!(actions
@@ -719,6 +816,8 @@ mod tests {
 
     #[test]
     fn test_maker_with_new_invitation() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = MakerStrategy;
 
         let po = PaymentObligationData {
@@ -738,7 +837,7 @@ mod tests {
             vec![],
         );
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         assert_eq!(actions.len(), 1);
         assert!(actions
@@ -748,6 +847,8 @@ mod tests {
 
     #[test]
     fn test_maker_with_active_session() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = MakerStrategy;
 
         let po = PaymentObligationData {
@@ -767,7 +868,7 @@ mod tests {
             vec![],
         );
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         assert_eq!(actions.len(), 1);
         assert!(actions
@@ -777,6 +878,8 @@ mod tests {
 
     #[test]
     fn test_maker_prefers_continue_when_invite_and_active() {
+        let mut sim = test_sim();
+        let wallet = WalletId(0).with_mut(&mut sim);
         let strategy = MakerStrategy;
 
         let po = PaymentObligationData {
@@ -797,7 +900,7 @@ mod tests {
             vec![],
         );
 
-        let actions = strategy.enumerate_candidate_actions(&view);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
 
         assert_eq!(actions.len(), 1);
         assert!(matches!(
