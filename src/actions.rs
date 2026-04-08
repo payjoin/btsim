@@ -44,8 +44,10 @@ fn piecewise_linear(x: f64, points: &[(f64, f64)]) -> f64 {
 pub(crate) enum Action {
     /// Spend a payment obligation unilaterally
     UnilateralPayments(Vec<PaymentObligationId>, CoinSelectionStrategy),
-    /// Participate in Multiparty payjoin
-    AcceptCospendProposal((MessageId, BulletinBoardId, PaymentObligationId)),
+    /// Accept a cospend invitation
+    AcceptCospendProposal((MessageId, BulletinBoardId)),
+    /// Contribute outputs to a cospend session that is waiting for them
+    ContributeOutputsToSession(BulletinBoardId, Vec<PaymentObligationId>),
     /// Continue to participate in a multi-party payjoin
     ContinueParticipateInCospend(BulletinBoardId),
     /// Create a cospend proposal: batch payment obligations and pair with order book UTXOs
@@ -150,7 +152,7 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Pred
     let payment_obligations_handled: Vec<PaymentObligationId> = match action {
         Action::UnilateralPayments(po_ids, _) => po_ids.clone(),
         Action::CreateCospendProposal(po_ids) => po_ids.clone(),
-        Action::AcceptCospendProposal((_, _, po_id)) => vec![*po_id],
+        Action::ContributeOutputsToSession(_, po_ids) => po_ids.clone(),
         _ => vec![],
     };
 
@@ -354,30 +356,38 @@ impl Strategy for MakerStrategy {
             actions.push(Action::ContinueParticipateInCospend(*bulletin_board_id));
         }
 
-        // Accept new invitations
+        // Accept new invitations. TODO: in the future makers will be have certain preferences for which invitations to accept.
         if let Some((bulletin_board_id, message_id)) = state.cospend_proposals.iter().next() {
             if state.active_cospends.is_empty() {
+                actions.push(Action::AcceptCospendProposal((
+                    *message_id,
+                    *bulletin_board_id,
+                )));
+            }
+        }
+
+        // Contribute outputs to sessions that are waiting for them (non-initiator, SentInputs state)
+        for (bb_id, session) in wallet.info().active_multi_party_payjoins.iter() {
+            if !session.is_initiator && session.state == TxConstructionState::SentInputs {
                 for po in state.payment_obligations.iter() {
-                    actions.push(Action::AcceptCospendProposal((
-                        *message_id,
-                        *bulletin_board_id,
-                        po.id,
-                    )));
+                    actions.push(Action::ContributeOutputsToSession(*bb_id, vec![po.id]));
                 }
             }
         }
 
-        // Only figure out what to register when there is nothing else to attend to.
-        // If there are active sessions or pending invitations, focus on those first.
-        // Find the common unilateral input: simulate each UnilateralSpender action, collect
-        // utxos_spent per outcome, and intersect. The resulting UTXO will be spent regardless,
-        // so advertising it on the order book is the best option.
-        let unilateral_actions =
-            if state.cospend_proposals.is_empty() && state.active_cospends.is_empty() {
-                UnilateralSpender.enumerate_candidate_actions(state, wallet)
-            } else {
-                vec![]
-            };
+        // Only figure out what to register when truly idle: no pending invitations, no active
+        // sessions (except completed ones). The wallet's session map is the authoritative source.
+        let has_active_sessions = !state.active_cospends.is_empty()
+            || wallet
+                .info()
+                .active_multi_party_payjoins
+                .values()
+                .any(|s| !matches!(s.state, TxConstructionState::Success(_)));
+        let unilateral_actions = if state.cospend_proposals.is_empty() && !has_active_sessions {
+            UnilateralSpender.enumerate_candidate_actions(state, wallet)
+        } else {
+            vec![]
+        };
         let per_action_spent: Vec<std::collections::HashSet<Outpoint>> = unilateral_actions
             .iter()
             .filter(|a| matches!(a, Action::UnilateralPayments(_, _)))
@@ -523,7 +533,10 @@ pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{wallet::{PaymentObligationData, WalletId}, TimeStep};
+    use crate::{
+        wallet::{PaymentObligationData, WalletId},
+        TimeStep,
+    };
     use bitcoin::Amount;
 
     fn create_test_wallet_view(payment_obligations: Vec<PaymentObligationData>) -> WalletView {
@@ -842,7 +855,54 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::AcceptCospendProposal(_))));
+            .any(|a| matches!(a, Action::AcceptCospendProposal((_, BulletinBoardId(0))))));
+    }
+
+    #[test]
+    fn test_maker_contributes_outputs_when_session_awaiting() {
+        let mut sim = test_sim();
+
+        // Create a bulletin board and accept an invitation, advancing session to SentInputs
+        let bb_id = sim.create_bulletin_board();
+        let msg_id = MessageId(0);
+        WalletId(0)
+            .with_mut(&mut sim)
+            .do_action(&Action::AcceptCospendProposal((msg_id, bb_id)));
+
+        let po = PaymentObligationData {
+            id: PaymentObligationId(0),
+            deadline: TimeStep(100),
+            reveal_time: TimeStep(0),
+            amount: Amount::from_sat(1000),
+            from: WalletId(0),
+            to: WalletId(1),
+        };
+
+        let strategy = MakerStrategy;
+        let wallet = WalletId(0).with_mut(&mut sim);
+
+        // Verify the session is in SentInputs state
+        let session = wallet
+            .info()
+            .active_multi_party_payjoins
+            .get(&bb_id)
+            .unwrap();
+        assert_eq!(
+            session.state,
+            crate::tx_contruction::TxConstructionState::SentInputs
+        );
+        assert!(!session.is_initiator);
+
+        let view = WalletView::new(vec![po], vec![], vec![], vec![], vec![]);
+        let actions = strategy.enumerate_candidate_actions(&view, &wallet);
+
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::ContributeOutputsToSession(id, ids) if *id == bb_id && ids.len() == 1)));
+        // Should NOT emit ContinueParticipateInCospend for this session
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, Action::ContinueParticipateInCospend(id) if *id == bb_id)));
     }
 
     #[test]

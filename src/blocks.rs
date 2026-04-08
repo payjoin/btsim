@@ -207,7 +207,6 @@ impl<'a> BroadcastSetHandleMut<'a> {
 
                                 for (_, mppj_session) in info.active_multi_party_payjoins.iter() {
                                     if mppj_session
-                                        .tx_template
                                         .inputs
                                         .iter()
                                         .any(|i| i.outpoint == input.data().outpoint)
