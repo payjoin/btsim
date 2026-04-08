@@ -9,7 +9,7 @@
 
 use crate::{
     bulletin_board::{BroadcastMessageType, BulletinBoardId},
-    transaction::{Outpoint, Output, TxData, TxId},
+    transaction::{Input, Outpoint, Output, TxData, TxId},
     wallet::PaymentObligationId,
     Simulation,
 };
@@ -18,8 +18,8 @@ use crate::{
 pub(crate) struct MultiPartyPayjoinSession {
     /// The payment obligations that are being handled in this session. Specific for each wallet
     pub(crate) payment_obligation_ids: Vec<PaymentObligationId>,
-    /// The transaction template for this session. Specific for each wallet
-    pub(crate) tx_template: TxData,
+    /// The inputs this wallet is committing to the session
+    pub(crate) inputs: Vec<Input>,
     /// The state of the session
     pub(crate) state: TxConstructionState,
     /// True if this wallet created the session (taker/initiator), false for makers/participants
