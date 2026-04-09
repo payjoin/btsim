@@ -53,7 +53,7 @@ pub(crate) enum Action {
     /// Create a cospend proposal: batch payment obligations and pair with order book UTXOs
     CreateCospendProposal(Vec<PaymentObligationId>),
     /// Register a single UTXO in the order book (maker action)
-    RegisterInput(Outpoint),
+    RegisterInput(Vec<Outpoint>),
     /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
     Wait,
 }
@@ -375,44 +375,56 @@ impl Strategy for MakerStrategy {
             }
         }
 
+        // Note: In the future makers/takers will prefer to register some coins
+        // over others. For now they register everything.
         // Only figure out what to register when truly idle: no pending invitations, no active
         // sessions (except completed ones). The wallet's session map is the authoritative source.
-        let has_active_sessions = !state.active_cospends.is_empty()
-            || wallet
-                .info()
-                .active_multi_party_payjoins
-                .values()
-                .any(|s| !matches!(s.state, TxConstructionState::Success(_)));
-        let unilateral_actions = if state.cospend_proposals.is_empty() && !has_active_sessions {
-            UnilateralSpender.enumerate_candidate_actions(state, wallet)
-        } else {
-            vec![]
-        };
-        let per_action_spent: Vec<std::collections::HashSet<Outpoint>> = unilateral_actions
-            .iter()
-            .filter(|a| matches!(a, Action::UnilateralPayments(_, _)))
-            .map(|action| {
-                simulate_one_action(wallet, action)
-                    .utxos_spent
-                    .into_iter()
-                    .collect()
-            })
-            .collect();
-        let common_input: Option<Outpoint> = per_action_spent
-            .iter()
-            .skip(1)
-            .fold(
-                per_action_spent.first().cloned().unwrap_or_default(),
-                |acc, s| acc.intersection(s).copied().collect(),
-            )
-            .into_iter()
-            .next();
-        if let Some(outpoint) = common_input {
-            if !state.registered_inputs.contains(&outpoint) {
-                actions.push(Action::RegisterInput(outpoint));
-            }
-        }
+        // let has_active_sessions = !state.active_cospends.is_empty()
+        //     || wallet
+        //         .info()
+        //         .active_multi_party_payjoins
+        //         .values()
+        //         .any(|s| !matches!(s.state, TxConstructionState::Success(_)));
+        // let unilateral_actions = if state.cospend_proposals.is_empty() && !has_active_sessions {
+        //     UnilateralSpender.enumerate_candidate_actions(state, wallet)
+        // } else {
+        //     vec![]
+        // };
+        // let per_action_spent: Vec<std::collections::HashSet<Outpoint>> = unilateral_actions
+        //     .iter()
+        //     .filter(|a| matches!(a, Action::UnilateralPayments(_, _)))
+        //     .map(|action| {
+        //         simulate_one_action(wallet, action)
+        //             .utxos_spent
+        //             .into_iter()
+        //             .collect()
+        //     })
+        //     .collect();
+        // let common_input: Option<Outpoint> = per_action_spent
+        //     .iter()
+        //     .skip(1)
+        //     .fold(
+        //         per_action_spent.first().cloned().unwrap_or_default(),
+        //         |acc, s| acc.intersection(s).copied().collect(),
+        //     )
+        //     .into_iter()
+        //     .next();
+        // for utxo in state.utxos.iter() {
+        //     if !state.registered_inputs.contains(&utxo.outpoint) {
+        //         actions.push(Action::RegisterInput(utxo.outpoint));
+        //     }
+        // }
 
+        if !state.utxos.is_empty() {
+            actions.push(Action::RegisterInput(
+                state
+                    .utxos
+                    .iter()
+                    .filter(|utxo| !state.registered_inputs.contains(&utxo.outpoint))
+                    .map(|utxo| utxo.outpoint.clone())
+                    .collect::<Vec<_>>(),
+            ));
+        }
         if actions.is_empty() {
             actions.push(Action::Wait);
         }

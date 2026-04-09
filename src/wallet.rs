@@ -534,15 +534,14 @@ impl<'a> WalletHandleMut<'a> {
             .insert(bulletin_board_id, session);
     }
 
-    fn register_input(&mut self, outpoint: &Outpoint) {
-        if self.info().registered_inputs.contains(outpoint) {
-            return;
+    fn register_input(&mut self, utxos: &Vec<Outpoint>) {
+        for outpoint in utxos.iter() {
+            self.info_mut().registered_inputs.insert(*outpoint);
+            info!(
+                "Wallet {:?} registered input {:?} in order book",
+                self.id, outpoint
+            );
         }
-        self.info_mut().registered_inputs.insert(*outpoint);
-        info!(
-            "Wallet {:?} registered input {:?} in order book",
-            self.id, outpoint
-        );
     }
 
     pub(crate) fn do_action(&'a mut self, action: &Action) {
