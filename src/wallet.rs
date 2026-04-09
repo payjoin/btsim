@@ -2,7 +2,7 @@ use crate::{
     actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
     blocks::BroadcastSetId,
     bulletin_board::BulletinBoardId,
-    cospend::{generate_candidates, UtxoWithAmount},
+    cospend::{generate_candidates, UtxoWithMetadata},
     message::{MessageId, MessageType},
     script_type::ScriptType,
     tx_contruction::{
@@ -444,9 +444,10 @@ impl<'a> WalletHandleMut<'a> {
         let utxos = self
             .handle()
             .unspent_coins()
-            .map(|o| UtxoWithAmount {
+            .map(|o| UtxoWithMetadata {
                 outpoint: o.outpoint(),
                 amount: o.data().amount,
+                owner: self.id,
             })
             .collect::<Vec<_>>();
         let registered_inputs = self
@@ -466,22 +467,25 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     // TODO: this should take input the list of order book entries
-    // Candidate selection should be done by the cost function
+    // TODO: at this point we are not concerned with what po's are handled just what inputs are being spent and which order book utxos we prefer.
+    // That should be the input to this method
     pub(crate) fn create_cospend_proposal(&'a mut self, po_ids: &[PaymentObligationId]) {
         // TODO: change should be decomposed.
         let change_addr = self.new_address();
         // TODO: should you try to construct with other utxos than the ones bnb picks out?
         let tx_template = self.construct_transaction_template(po_ids, &change_addr, false, None);
         let orderbook_utxos = self.sim.get_orderbook_utxos();
+        // TODO: currently we pick all order book utxos,
         let candidates = generate_candidates(
             &orderbook_utxos,
             &tx_template
                 .inputs
                 .iter()
                 .map(|input| input.outpoint.with(self.sim))
-                .map(|input| UtxoWithAmount {
+                .map(|input| UtxoWithMetadata {
                     outpoint: input.outpoint,
                     amount: input.data().amount,
+                    owner: self.id,
                 })
                 .collect::<Vec<_>>(),
         );
@@ -493,6 +497,7 @@ impl<'a> WalletHandleMut<'a> {
         }
 
         // Collect unique maker wallet IDs from the best candidate
+        // TODO: Why must this be unique?
         let maker_ids: Vec<WalletId> = candidates
             .iter()
             .map(|e| e.owner)

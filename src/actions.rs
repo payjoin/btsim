@@ -4,7 +4,7 @@ use log::debug;
 
 use crate::{
     bulletin_board::BulletinBoardId,
-    cospend::UtxoWithAmount,
+    cospend::UtxoWithMetadata,
     message::MessageId,
     transaction::Outpoint,
     tx_contruction::TxConstructionState,
@@ -119,7 +119,7 @@ pub(crate) struct WalletView {
     payment_obligations: Vec<PaymentObligationData>,
     active_cospends: Vec<BulletinBoardId>,
     cospend_proposals: Vec<(BulletinBoardId, MessageId)>,
-    utxos: Vec<UtxoWithAmount>,
+    utxos: Vec<UtxoWithMetadata>,
     registered_inputs: Vec<Outpoint>,
 }
 
@@ -128,7 +128,7 @@ impl WalletView {
         payment_obligations: Vec<PaymentObligationData>,
         cospend_proposals: Vec<(BulletinBoardId, MessageId)>,
         active_cospends: Vec<BulletinBoardId>,
-        utxos: Vec<UtxoWithAmount>,
+        utxos: Vec<UtxoWithMetadata>,
         registered_inputs: Vec<Outpoint>,
     ) -> Self {
         Self {

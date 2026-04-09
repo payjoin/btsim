@@ -15,8 +15,7 @@ use serde::Serialize;
 use crate::bulletin_board::BroadcastMessageType;
 use crate::bulletin_board::BulletinBoardData;
 use crate::bulletin_board::BulletinBoardId;
-use crate::cospend::OrderBookEntry;
-use crate::cospend::UtxoWithAmount;
+use crate::cospend::UtxoWithMetadata;
 use crate::message::MessageType;
 use crate::tx_contruction::MultiPartyPayjoinSession;
 use crate::{
@@ -595,7 +594,7 @@ impl<'a> Simulation {
         bx_id.with_mut(self).broadcast(txs)
     }
 
-    fn get_orderbook_utxos(&'a self) -> Vec<OrderBookEntry> {
+    fn get_orderbook_utxos(&'a self) -> Vec<UtxoWithMetadata> {
         self.wallet_data
             .iter()
             .flat_map(|wallet| {
@@ -603,11 +602,9 @@ impl<'a> Simulation {
                 info.registered_inputs
                     .iter()
                     .filter(|outpoint| info.confirmed_utxos.contains(outpoint))
-                    .map(|outpoint| OrderBookEntry {
-                        utxo: UtxoWithAmount {
-                            outpoint: *outpoint,
-                            amount: outpoint.with(self).data().amount,
-                        },
+                    .map(|outpoint| UtxoWithMetadata {
+                        outpoint: *outpoint,
+                        amount: outpoint.with(self).data().amount,
                         owner: wallet.id,
                     })
                     .collect::<Vec<_>>()
