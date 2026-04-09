@@ -50,6 +50,7 @@ impl Config {
             "BatchSpender",
             "TakerStrategy",
             "MakerStrategy",
+            "AggregatorStrategy",
         ];
         for wallet_type in &config.wallet_types {
             for strategy in &wallet_type.strategies {

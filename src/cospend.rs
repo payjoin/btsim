@@ -2,28 +2,33 @@ use crate::transaction::Outpoint;
 use crate::wallet::WalletId;
 use bitcoin::Amount;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UtxoWithMetadata {
     pub(crate) outpoint: Outpoint,
     pub(crate) amount: Amount,
     pub(crate) owner: WalletId,
 }
 
+/// Non-committal intent to cospend: every participant coin in the match (no taker/maker roles).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CospendInterest {
+    pub(crate) utxos: Vec<UtxoWithMetadata>,
+}
+
 fn amount_distance(a: Amount, b: Amount) -> u64 {
     a.to_sat().abs_diff(b.to_sat())
 }
 
-/// Returns order book entries sorted by value asymmetry relative to the taker's UTXOs.
-/// Each entry is scored by the minimum amount distance to any taker UTXO,
-/// so the best-matched makers appear first.
+/// Returns order book entries sorted by value asymmetry relative to the given reference UTXOs.
+/// Each entry is scored by the minimum amount distance to any reference UTXO.
 pub(crate) fn generate_candidates(
     order_book: &[UtxoWithMetadata],
-    taker_utxos: &[UtxoWithMetadata],
+    reference_utxos: &[UtxoWithMetadata],
 ) -> Vec<UtxoWithMetadata> {
     let mut scored: Vec<(u64, &UtxoWithMetadata)> = order_book
         .iter()
         .map(|entry| {
-            let min_dist = taker_utxos
+            let min_dist = reference_utxos
                 .iter()
                 .map(|t| amount_distance(entry.amount, t.amount))
                 .min()

@@ -1,15 +1,11 @@
-// First stage is to send the bulletin board id to all my receivers (M)
-// For now these will be all the receivers in the mp pj session. In the future these peers can invite their recievers to join as well.
-// For simplicity we will just work with M = N
-
-// Then I can send my inputs and wait for at least N-1 other participants to send their inputs
-// After that I send my outputs and wait for at least N-1 other participants to send their outputs
-// Then we signal we are ready to sign. Signing is ommited from this protocol.
-// the mppj session intiator will sign the tx and broadcast it to the network.
+// The aggregator pre-fills all inputs on the bulletin board and sends invitations.
+// Each participant accepts the invitation (AcceptedProposal state), then contributes their outputs.
+// After sending outputs (SentOutputs), each participant signals ready-to-sign.
+// Any participant who observes enough ready-to-sign messages may broadcast the tx.
 
 use crate::{
     bulletin_board::{BroadcastMessageType, BulletinBoardId},
-    transaction::{Input, Outpoint, Output, TxData, TxId},
+    transaction::{Input, Output, TxData, TxId},
     wallet::PaymentObligationId,
     Simulation,
 };
@@ -22,97 +18,15 @@ pub(crate) struct MultiPartyPayjoinSession {
     pub(crate) inputs: Vec<Input>,
     /// The state of the session
     pub(crate) state: TxConstructionState,
-    /// True if this wallet created the session (taker/initiator), false for makers/participants
-    pub(crate) is_initiator: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TxConstructionState {
-    SentBulletinBoardId,
-    SentInputs,
+    /// Wallet has accepted the aggregator's invitation; inputs are already known
+    AcceptedProposal,
     SentOutputs,
     SentReadyToSign,
     Success(Option<TxId>),
-}
-
-#[derive(Debug)]
-pub(crate) struct SentBulletinBoardId<'a> {
-    pub(crate) bulletin_board_id: BulletinBoardId,
-    pub(crate) tx_template: TxData,
-    pub(crate) sim: &'a mut Simulation,
-}
-
-impl<'a> SentBulletinBoardId<'a> {
-    pub(crate) fn new(
-        sim: &'a mut Simulation,
-        bulletin_board_id: BulletinBoardId,
-        tx_template: TxData,
-    ) -> Self {
-        Self {
-            bulletin_board_id,
-            tx_template,
-            sim,
-        }
-    }
-
-    pub(crate) fn send_inputs(self) -> SentInputs<'a> {
-        for input in self.tx_template.inputs.iter() {
-            self.sim.add_message_to_bulletin_board(
-                self.bulletin_board_id,
-                BroadcastMessageType::ContributeInputs(input.outpoint.clone()),
-            );
-        }
-        SentInputs::new(self.sim, self.bulletin_board_id, self.tx_template.clone())
-    }
-}
-
-pub(crate) struct SentInputs<'a> {
-    pub(crate) bulletin_board_id: BulletinBoardId,
-    pub(crate) tx_template: TxData,
-    pub(crate) sim: &'a mut Simulation,
-}
-
-impl<'a> SentInputs<'a> {
-    pub(crate) fn new(
-        sim: &'a mut Simulation,
-        bulletin_board_id: BulletinBoardId,
-        tx_template: TxData,
-    ) -> Self {
-        Self {
-            bulletin_board_id,
-            tx_template,
-            sim,
-        }
-    }
-
-    fn read_txin_messages(&self) -> Vec<Outpoint> {
-        let messages = self.sim.bulletin_boards[self.bulletin_board_id.0]
-            .messages
-            .iter()
-            .filter_map(|message| match message {
-                BroadcastMessageType::ContributeInputs(outpoint) => Some(outpoint.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        messages
-    }
-
-    pub(crate) fn have_enough_inputs(self) -> Option<SentOutputs<'a>> {
-        // Broadcast my outputs
-        for output in self.tx_template.outputs.iter() {
-            self.sim.add_message_to_bulletin_board(
-                self.bulletin_board_id,
-                BroadcastMessageType::ContributeOutputs(output.clone()),
-            );
-        }
-
-        Some(SentOutputs::new(
-            self.sim,
-            self.bulletin_board_id,
-            self.tx_template.clone(),
-        ))
-    }
 }
 
 #[derive(Debug)]
@@ -197,7 +111,7 @@ impl<'a> SentReadyToSign<'a> {
         if ready_to_sign_messages < n {
             return None;
         }
-        // Signatures are abstracted away, so the "leader" can just boradcast to the network
+        // Signatures are abstracted away; identical TxData is deduped when recorded on-chain.
         let messages = self.sim.bulletin_boards[self.bulletin_board_id.0]
             .messages
             .clone();
@@ -223,7 +137,7 @@ mod tests {
     use super::*;
     use crate::{
         actions::{create_strategy, CompositeScorer, CompositeStrategy},
-        transaction::Input,
+        transaction::{Input, Outpoint},
         SimulationBuilder,
     };
     use bitcoin::Amount;
@@ -250,13 +164,13 @@ mod tests {
             SimulationBuilder::new(42, wallet_types, 10, 1, 0).build()
         }
 
-        /// Creates a mock transaction template with specified number of inputs and outputs
+        /// Creates a mock output template for a wallet (inputs are not placed on the BB —
+        /// the aggregator handles that separately)
         pub fn create_mock_tx_template(
             sim: &mut crate::Simulation,
             num_inputs: usize,
             num_outputs: usize,
         ) -> TxData {
-            // Create a wallet and address for outputs
             let default_scorer = CompositeScorer {
                 fee_savings_weight: 0.0,
                 privacy_weight: 0.0,
@@ -272,30 +186,27 @@ mod tests {
             );
             let address = wallet.with_mut(sim).new_address();
 
-            // Create mock inputs (using dummy outpoints)
-            let mut inputs = Vec::new();
-            for i in 0..num_inputs {
-                inputs.push(Input {
+            // Dummy inputs (used only to determine how many ready-to-sign messages to broadcast)
+            let inputs = (0..num_inputs)
+                .map(|i| Input {
                     outpoint: Outpoint {
                         txid: TxId(i),
                         index: 0,
                     },
-                });
-            }
+                })
+                .collect();
 
-            // Create mock outputs
-            let mut outputs = Vec::new();
-            for _ in 0..num_outputs {
-                outputs.push(Output {
+            let outputs = (0..num_outputs)
+                .map(|_| Output {
                     amount: Amount::from_sat(1000),
                     address_id: address,
-                });
-            }
+                })
+                .collect();
 
             TxData { inputs, outputs }
         }
 
-        /// Adds input contributions from other participants to the bulletin board
+        /// Simulates the aggregator pre-filling inputs on the bulletin board
         pub fn add_other_inputs(
             sim: &mut crate::Simulation,
             bulletin_board_id: BulletinBoardId,
@@ -305,7 +216,7 @@ mod tests {
                 sim.add_message_to_bulletin_board(
                     bulletin_board_id,
                     BroadcastMessageType::ContributeInputs(Outpoint {
-                        txid: TxId(100 + i), // Use different txids to distinguish
+                        txid: TxId(100 + i),
                         index: 0,
                     }),
                 );
@@ -363,79 +274,59 @@ mod tests {
     fn test_state_machine() {
         let mut sim = test_harness::create_minimal_simulation(3);
 
-        let tx_template_1 = test_harness::create_mock_tx_template(&mut sim, 2, 1);
-
         let bulletin_board_id = sim.create_bulletin_board();
-        test_harness::add_other_inputs(&mut sim, bulletin_board_id, 2);
+
+        // Aggregator pre-fills all inputs (4 total: 2 "ours" + 2 from other participant)
+        test_harness::add_other_inputs(&mut sim, bulletin_board_id, 4);
+        // Other participant has contributed 2 outputs and 2 ready-to-sign messages
         test_harness::add_other_outputs(&mut sim, bulletin_board_id, 2);
         test_harness::add_other_ready_to_sign(&mut sim, bulletin_board_id, 2);
 
-        let session_1 = SentBulletinBoardId::new(&mut sim, bulletin_board_id, tx_template_1);
-        let session_1 = session_1.send_inputs();
+        // This wallet's tx template: 2 dummy inputs (length determines ready-to-sign count),
+        // 1 output to contribute
+        let tx_template = test_harness::create_mock_tx_template(&mut sim, 2, 1);
 
-        // Send other inputs
-        let sent_outputs = session_1
-            .have_enough_inputs()
-            .expect("should have enough inputs");
+        // ContributeOutputsToSession broadcasts our output to the BB
+        for output in tx_template.outputs.iter() {
+            sim.add_message_to_bulletin_board(
+                bulletin_board_id,
+                BroadcastMessageType::ContributeOutputs(output.clone()),
+            );
+        }
+
+        // SentOutputs: broadcast ready-to-sign for our 2 inputs
+        let sent_outputs = SentOutputs::new(&mut sim, bulletin_board_id, tx_template);
         let sent_ready = sent_outputs
             .have_enough_outputs()
-            .expect("should have enough outputs");
+            .expect("should proceed to SentReadyToSign");
+
+        // SentReadyToSign: 2 (others) + 2 (ours) = 4 ready-to-sign >= 4 inputs → success
         let txdata = sent_ready
             .have_enough_ready_to_sign()
             .expect("should have enough ready to sign");
 
-        // Verify input composition (2 from template + 2 from others)
+        // 4 inputs pre-filled by aggregator
         assert_eq!(txdata.inputs.len(), 4);
-
-        // Collect all TxIds from inputs
-        let input_txids: Vec<usize> = txdata
-            .inputs
-            .iter()
-            .map(|input| input.outpoint.txid.0)
-            .collect();
-
-        // Should have template inputs (TxId(0) and TxId(1))
-        assert!(
-            input_txids.contains(&0),
-            "Should contain template input TxId(0)"
-        );
-        assert!(
-            input_txids.contains(&1),
-            "Should contain template input TxId(1)"
-        );
-
-        // Should have other participant inputs (TxId(100) and TxId(101))
-        assert!(
-            input_txids.contains(&100),
-            "Should contain other participant input TxId(100)"
-        );
-        assert!(
-            input_txids.contains(&101),
-            "Should contain other participant input TxId(101)"
-        );
-
-        // Verify output composition (1 from template + 2 from others)
+        // 3 outputs: 2 from others (2000 sats) + 1 from this wallet (1000 sats)
         assert_eq!(txdata.outputs.len(), 3);
 
-        // Should have 1 output with 1000 sats (from template) and 2 outputs with 2000 sats (from others)
         let output_1000_count = txdata
             .outputs
             .iter()
-            .filter(|output| output.amount == Amount::from_sat(1000))
+            .filter(|o| o.amount == Amount::from_sat(1000))
             .count();
         let output_2000_count = txdata
             .outputs
             .iter()
-            .filter(|output| output.amount == Amount::from_sat(2000))
+            .filter(|o| o.amount == Amount::from_sat(2000))
             .count();
-
         assert_eq!(
             output_1000_count, 1,
-            "Should have exactly 1 output with 1000 sats from template"
+            "1 output at 1000 sats from this wallet"
         );
         assert_eq!(
             output_2000_count, 2,
-            "Should have exactly 2 outputs with 2000 sats from other participants"
+            "2 outputs at 2000 sats from other participant"
         );
     }
 }

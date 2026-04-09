@@ -2,13 +2,10 @@ use crate::{
     actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
     blocks::BroadcastSetId,
     bulletin_board::BulletinBoardId,
-    cospend::{generate_candidates, UtxoWithMetadata},
+    cospend::UtxoWithMetadata,
     message::{MessageId, MessageType},
     script_type::ScriptType,
-    tx_contruction::{
-        MultiPartyPayjoinSession, SentBulletinBoardId, SentInputs, SentOutputs, SentReadyToSign,
-        TxConstructionState,
-    },
+    tx_contruction::{MultiPartyPayjoinSession, SentOutputs, SentReadyToSign, TxConstructionState},
     CoinSelectionStrategy, Simulation, TimeStep,
 };
 use bdk_coin_select::{
@@ -277,69 +274,16 @@ impl<'a> WalletHandleMut<'a> {
             state
         );
         match state {
-            TxConstructionState::SentBulletinBoardId => {
-                let inputs = session.inputs.clone();
-                let mut updated_session = session.clone();
-                let t = SentBulletinBoardId::new(
-                    self.sim,
-                    *bulletin_board_id,
-                    TxData {
-                        inputs,
-                        outputs: vec![],
-                    },
-                );
-                t.send_inputs();
-                updated_session.state = TxConstructionState::SentInputs;
-                self.info_mut()
-                    .active_multi_party_payjoins
-                    .insert(*bulletin_board_id, updated_session);
+            TxConstructionState::AcceptedProposal => {
+                // Outputs are contributed via ContributeOutputsToSession; nothing to do here.
                 log::info!(
-                    "Sent inputs for multi party payjoin session with bulletin board id: {:?}",
+                    "wallet id: {:?} in AcceptedProposal state for bb {:?}, waiting for ContributeOutputsToSession",
+                    self.id,
                     bulletin_board_id
                 );
             }
-            TxConstructionState::SentInputs => {
-                // Taker only: non-initiator sessions wait for ContributeOutputsToSession action
-                let inputs = session.inputs.clone();
-                let po_ids = session.payment_obligation_ids.clone();
-                let input_outpoints: Vec<Outpoint> = inputs.iter().map(|i| i.outpoint).collect();
-                let required = if input_outpoints.is_empty() {
-                    None
-                } else {
-                    Some(input_outpoints.as_slice())
-                };
-                let change_addr = self.new_address();
-                let full_template =
-                    self.construct_transaction_template(&po_ids, &change_addr, false, required);
-                let t = SentInputs::new(
-                    self.sim,
-                    *bulletin_board_id,
-                    TxData {
-                        inputs,
-                        outputs: full_template.outputs,
-                    },
-                );
-                let res = t.have_enough_inputs();
-                if res.is_some() {
-                    let mut updated_session = self
-                        .info()
-                        .active_multi_party_payjoins
-                        .get(bulletin_board_id)
-                        .unwrap()
-                        .clone();
-                    updated_session.state = TxConstructionState::SentOutputs;
-                    self.info_mut()
-                        .active_multi_party_payjoins
-                        .insert(*bulletin_board_id, updated_session);
-                    log::info!(
-                        "Sent outputs for multi party payjoin session with bulletin board id: {:?}",
-                        bulletin_board_id
-                    );
-                }
-            }
             TxConstructionState::SentOutputs => {
                 let inputs = session.inputs.clone();
-                let mut updated_session = session.clone();
                 let t = SentOutputs::new(
                     self.sim,
                     *bulletin_board_id,
@@ -365,25 +309,34 @@ impl<'a> WalletHandleMut<'a> {
                 let t = SentReadyToSign::new(self.sim, *bulletin_board_id);
                 let res = t.have_enough_ready_to_sign();
                 if let Some(tx) = res {
-                    if !session.is_initiator {
-                        let mut updated_session = session.clone();
-                        updated_session.state = TxConstructionState::Success(None);
+                    // Only the participant with the lowest wallet ID broadcasts to avoid
+                    // duplicate transactions (new_tx deduplicates by content, so all
+                    // participants would get the same TxId, violating broadcast/received invariants).
+                    let min_participant_id = self.sim.bulletin_boards[bulletin_board_id.0]
+                        .messages
+                        .iter()
+                        .filter_map(|msg| match msg {
+                            crate::bulletin_board::BroadcastMessageType::ContributeInputs(op) => {
+                                Some(op.with(self.sim).wallet().id)
+                            }
+                            _ => None,
+                        })
+                        .min();
+                    let is_broadcaster = min_participant_id == Some(self.id);
 
-                        // TODO: update latest wallet info index in wallet data
+                    let tx_id = if is_broadcaster {
+                        let id = self.spend_tx(tx);
+                        self.broadcast(std::iter::once(id));
+                        let po_ids = session.payment_obligation_ids.clone();
                         self.info_mut()
-                            .active_multi_party_payjoins
-                            .insert(*bulletin_board_id, updated_session);
-                        return;
-                    }
-                    let tx_id = self.spend_tx(tx);
-                    self.broadcast(std::iter::once(tx_id));
-                    let po_ids = session.payment_obligation_ids.clone();
-                    self.info_mut()
-                        .txid_to_payment_obligation_ids
-                        .insert(tx_id, po_ids);
-                    // TODO: update latest wallet info index in wallet data
+                            .txid_to_payment_obligation_ids
+                            .insert(id, po_ids);
+                        Some(id)
+                    } else {
+                        None
+                    };
                     let mut updated_session = session.clone();
-                    updated_session.state = TxConstructionState::Success(Some(tx_id));
+                    updated_session.state = TxConstructionState::Success(tx_id);
                     self.info_mut()
                         .active_multi_party_payjoins
                         .insert(*bulletin_board_id, updated_session);
@@ -409,25 +362,24 @@ impl<'a> WalletHandleMut<'a> {
             .cloned()
             .collect::<Vec<_>>();
         let wallet_info = self.info();
-        // New multi party payjoin sessions
-        let new_multi_party_payjoins = messages
+        // New cospend proposals
+        let new_cospend_proposals = messages
             .iter()
             .filter_map(|message| match &message.message {
-                MessageType::InitiateMultiPartyPayjoin(bulletin_board_id) => {
+                MessageType::ProposeCoSpend(bulletin_board_id) => {
                     Some((*bulletin_board_id, message.id))
                 }
                 MessageType::RegisterWalletInput(_) => None,
             })
             .collect::<Vec<_>>();
-        // Already active multi party payjoin sessions
+        // Already active multi party payjoin sessions (AcceptedProposal handled via ContributeOutputsToSession)
         let active_mp_pj_sessions = wallet_info
             .active_multi_party_payjoins
             .iter()
             .filter_map(|(bulletin_board_id, session)| match &session.state {
-                TxConstructionState::SentBulletinBoardId
-                | TxConstructionState::SentInputs
-                | TxConstructionState::SentOutputs
-                | TxConstructionState::SentReadyToSign => Some(*bulletin_board_id),
+                TxConstructionState::SentOutputs | TxConstructionState::SentReadyToSign => {
+                    Some(*bulletin_board_id)
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -437,6 +389,19 @@ impl<'a> WalletHandleMut<'a> {
             .clone()
             .iter()
             .filter(|po_id| !wallet_info.handled_payment_obligations.contains(po_id))
+            // Do not offer paying again while a tx for this PO is already in the mempool;
+            // handled_payment_obligations only updates on confirm, so without this the wallet
+            // could build another tx reusing the same inputs (double-spend in `spends`).
+            .filter(|po_id| {
+                !wallet_info
+                    .txid_to_payment_obligation_ids
+                    .iter()
+                    .any(|(txid, po_ids)| {
+                        wallet_info.unconfirmed_transactions.contains(txid)
+                            && po_ids.contains(po_id)
+                    })
+            })
+            // Filter out POs that are not revealed yet
             .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
             .map(|po| po.with(self.sim).data().clone())
             .collect::<Vec<_>>();
@@ -456,82 +421,18 @@ impl<'a> WalletHandleMut<'a> {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
+        let orderbook_utxos = self.sim.get_orderbook_utxos();
+        let pending_interests = self.sim.cospend_interests.clone();
 
         WalletView::new(
             payment_obligations,
-            new_multi_party_payjoins,
+            new_cospend_proposals,
             active_mp_pj_sessions,
             utxos,
             registered_inputs,
+            orderbook_utxos,
+            pending_interests,
         )
-    }
-
-    // TODO: this should take input the list of order book entries
-    // TODO: at this point we are not concerned with what po's are handled just what inputs are being spent and which order book utxos we prefer.
-    // That should be the input to this method
-    pub(crate) fn create_cospend_proposal(&'a mut self, po_ids: &[PaymentObligationId]) {
-        // TODO: change should be decomposed.
-        let change_addr = self.new_address();
-        // TODO: should you try to construct with other utxos than the ones bnb picks out?
-        let tx_template = self.construct_transaction_template(po_ids, &change_addr, false, None);
-        let orderbook_utxos = self.sim.get_orderbook_utxos();
-        // TODO: currently we pick all order book utxos,
-        let candidates = generate_candidates(
-            &orderbook_utxos,
-            &tx_template
-                .inputs
-                .iter()
-                .map(|input| input.outpoint.with(self.sim))
-                .map(|input| UtxoWithMetadata {
-                    outpoint: input.outpoint,
-                    amount: input.data().amount,
-                    owner: self.id,
-                })
-                .collect::<Vec<_>>(),
-        );
-
-        // If no candidates, fall back to a plain batch spend
-        if candidates.is_empty() {
-            self.handle_payment_obligations(po_ids, false);
-            return;
-        }
-
-        // Collect unique maker wallet IDs from the best candidate
-        // TODO: Why must this be unique?
-        let maker_ids: Vec<WalletId> = candidates
-            .iter()
-            .map(|e| e.owner)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        // Create a multi-party payjoin session with the selected makers
-        let bulletin_board_id = self.sim.create_bulletin_board();
-
-        // Invite each maker to join the session
-        for maker_id in &maker_ids {
-            self.sim.broadcast_message(
-                *maker_id,
-                self.id,
-                MessageType::InitiateMultiPartyPayjoin(bulletin_board_id),
-            );
-        }
-
-        // Send taker's inputs to the bulletin board
-        let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
-        session.send_inputs();
-        info!("Sent inputs for cospend session");
-
-        // Track the session
-        let session = MultiPartyPayjoinSession {
-            payment_obligation_ids: po_ids.to_owned(),
-            inputs: tx_template.inputs,
-            state: TxConstructionState::SentInputs,
-            is_initiator: true,
-        };
-        self.info_mut()
-            .active_multi_party_payjoins
-            .insert(bulletin_board_id, session);
     }
 
     fn register_input(&mut self, outpoint: &Outpoint) {
@@ -556,26 +457,67 @@ impl<'a> WalletHandleMut<'a> {
                 );
             }
             Action::AcceptCospendProposal((message_id, bulletin_board_id)) => {
-                // Commit to inputs only. outputs (and PO selection) deferred to ContributeOutputsToSession
-                let registered_input = self
-                    .info()
-                    .registered_inputs
+                // Aggregator already pre-filled all inputs on the bulletin board.
+                // Find our own inputs from the bulletin board's ContributeInputs messages.
+                use crate::bulletin_board::BroadcastMessageType;
+                let my_inputs: Vec<Input> = self.sim.bulletin_boards[bulletin_board_id.0]
+                    .messages
                     .iter()
-                    .find(|op| self.info().confirmed_utxos.contains(op))
-                    .copied();
+                    .filter_map(|msg| match msg {
+                        BroadcastMessageType::ContributeInputs(op) => Some(op),
+                        _ => None,
+                    })
+                    .filter(|op| self.info().confirmed_utxos.contains(op))
+                    .map(|op| Input { outpoint: *op })
+                    .collect();
                 self.info_mut().active_multi_party_payjoins.insert(
                     *bulletin_board_id,
                     MultiPartyPayjoinSession {
                         payment_obligation_ids: vec![],
-                        inputs: registered_input
-                            .map(|op| vec![Input { outpoint: op }])
-                            .unwrap_or_default(),
-                        state: TxConstructionState::SentBulletinBoardId,
-                        is_initiator: false,
+                        inputs: my_inputs,
+                        state: TxConstructionState::AcceptedProposal,
                     },
                 );
                 self.data_mut().messages_processed.insert(*message_id);
-                self.participate_in_multi_party_payjoin(bulletin_board_id);
+            }
+            Action::ProposeCospend(interests) => {
+                for interest in interests {
+                    self.sim.cospend_interests.push(interest.clone());
+                }
+            }
+            Action::CreateAggregateProposal(interests) => {
+                let bb_id = self.sim.create_bulletin_board();
+                // Collect unique (outpoint, owner) pairs to avoid double-spending
+                // when multiple interests share the same UTXO (e.g. taker proposes
+                // the same UTXO against multiple makers).
+                let mut seen_outpoints = std::collections::HashSet::new();
+                let unique_utxos: Vec<_> = interests
+                    .iter()
+                    .flat_map(|i| i.utxos.iter())
+                    .filter(|u| seen_outpoints.insert(u.outpoint))
+                    .collect();
+                // Pre-fill all unique inputs on the bulletin board
+                for u in &unique_utxos {
+                    self.sim.add_message_to_bulletin_board(
+                        bb_id,
+                        crate::bulletin_board::BroadcastMessageType::ContributeInputs(u.outpoint),
+                    );
+                }
+                // Invite each unique participant once
+                let mut invited = std::collections::HashSet::new();
+                for u in &unique_utxos {
+                    if invited.insert(u.owner) {
+                        self.sim.broadcast_message(
+                            u.owner,
+                            self.id,
+                            MessageType::ProposeCoSpend(bb_id),
+                        );
+                    }
+                }
+                // Clear the handled interests
+                self.sim
+                    .cospend_interests
+                    .retain(|i| !interests.contains(i));
             }
             Action::ContributeOutputsToSession(bulletin_board_id, po_ids) => {
                 let session_inputs = self
@@ -595,30 +537,24 @@ impl<'a> WalletHandleMut<'a> {
                 let change_addr = self.new_address();
                 let full_template =
                     self.construct_transaction_template(po_ids, &change_addr, false, required);
-                let t = SentInputs::new(
-                    self.sim,
-                    *bulletin_board_id,
-                    TxData {
-                        inputs: session_inputs,
-                        outputs: full_template.outputs,
-                    },
-                );
-                let res = t.have_enough_inputs();
-                if res.is_some() {
-                    let session = self
-                        .info_mut()
-                        .active_multi_party_payjoins
-                        .get_mut(bulletin_board_id)
-                        .unwrap();
-                    session.payment_obligation_ids = po_ids.clone();
-                    session.state = TxConstructionState::SentOutputs;
+                // Inputs are already pre-filled by the aggregator; broadcast our outputs directly.
+                use crate::bulletin_board::BroadcastMessageType;
+                for output in full_template.outputs.iter() {
+                    self.sim.add_message_to_bulletin_board(
+                        *bulletin_board_id,
+                        BroadcastMessageType::ContributeOutputs(output.clone()),
+                    );
                 }
+                let session = self
+                    .info_mut()
+                    .active_multi_party_payjoins
+                    .get_mut(bulletin_board_id)
+                    .unwrap();
+                session.payment_obligation_ids = po_ids.clone();
+                session.state = TxConstructionState::SentOutputs;
             }
             Action::ContinueParticipateInCospend(bulletin_board_id) => {
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
-            }
-            Action::CreateCospendProposal(po_ids) => {
-                self.create_cospend_proposal(po_ids);
             }
             Action::RegisterInput(outpoint) => {
                 self.register_input(outpoint);

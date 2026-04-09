@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::bulletin_board::BroadcastMessageType;
 use crate::bulletin_board::BulletinBoardData;
 use crate::bulletin_board::BulletinBoardId;
-use crate::cospend::UtxoWithMetadata;
+use crate::cospend::{CospendInterest, UtxoWithMetadata};
 use crate::message::MessageType;
 use crate::tx_contruction::MultiPartyPayjoinSession;
 use crate::{
@@ -240,6 +240,7 @@ impl SimulationBuilder {
             broadcast_set_info: Vec::new(),
             messages: Vec::new(),
             bulletin_boards: Vec::new(),
+            cospend_interests: Vec::new(),
             economic_graph: EconomicGraph::new(3, economic_graph_prng),
             config: SimulationConfig {
                 num_wallets: self.total_wallets(),
@@ -342,6 +343,9 @@ pub struct Simulation {
 
     /// Broadcast bulletin boards
     bulletin_boards: Vec<BulletinBoardData>,
+
+    /// Pending cospend interests from takers (non-committal proposals)
+    pub(crate) cospend_interests: Vec<CospendInterest>,
 
     // secondary information (indexes)
     /// Map of outpoints to the set of (txid, input index) pairs that spend them
@@ -597,7 +601,7 @@ impl<'a> Simulation {
         bx_id.with_mut(self).broadcast(txs)
     }
 
-    fn get_orderbook_utxos(&'a self) -> Vec<UtxoWithMetadata> {
+    pub(crate) fn get_orderbook_utxos(&'a self) -> Vec<UtxoWithMetadata> {
         self.wallet_data
             .iter()
             .flat_map(|wallet| {

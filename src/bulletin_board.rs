@@ -1,4 +1,7 @@
-use crate::transaction::{Outpoint, Output};
+use crate::{
+    cospend::UtxoWithMetadata,
+    transaction::{Outpoint, Output},
+};
 
 define_entity!(
     BulletinBoard,
@@ -18,6 +21,7 @@ impl<'a> BulletinBoardHandle<'a> {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum BroadcastMessageType {
+    AcceptCoSpend(Vec<UtxoWithMetadata>),
     ContributeInputs(Outpoint),
     ContributeOutputs(Output),
     ReadyToSign(),

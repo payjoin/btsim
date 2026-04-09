@@ -28,3 +28,16 @@ fee_savings_weight = 0.5
 privacy_weight = 1.0
 payment_obligation_weight = 1.0
 coordination_weight = 2.0
+
+# Aggregators: create aggregate proposals from pending interests
+[[wallet_types]]
+name = "aggregator"
+count = 1
+strategies = ["AggregatorStrategy"]
+script_type = "p2wpkh"
+
+[wallet_types.scorer]
+fee_savings_weight = 0.0
+privacy_weight = 0.0
+payment_obligation_weight = 0.0
+coordination_weight = 0.0

@@ -9,8 +9,8 @@ pub(crate) struct UTXORegisteration {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum MessageType {
-    /// Initiate a multi-party payjoin
-    InitiateMultiPartyPayjoin(BulletinBoardId),
+    /// Initiate a multi-party payjoin (shared bulletin board id for all participants).
+    ProposeCoSpend(BulletinBoardId),
     /// Register a input in the order book
     RegisterWalletInput(UTXORegisteration),
 }
