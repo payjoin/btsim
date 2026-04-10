@@ -220,7 +220,11 @@ impl SimulationBuilder {
             peer_graph: self.create_fully_connected_peer_graph(),
             wallet_data: Vec::new(),
             payment_data: Vec::new(),
-            address_data: Vec::new(),
+            address_data: vec![AddressData {
+                // First address is the "miner" address
+                wallet_id: WalletId(0),
+                script_type: ScriptType::P2tr,
+            }],
             tx_data: Vec::new(),
             broadcast_set_data: Vec::new(),
             block_data: Vec::new(),
@@ -410,8 +414,7 @@ impl<'a> Simulation {
     }
 
     fn miner_address(&mut self) -> AddressId {
-        let miner = self.wallet_data[0].id;
-        miner.with_mut(self).new_address()
+        AddressId(0)
     }
 
     fn create_bulletin_board(&mut self) -> BulletinBoardId {
