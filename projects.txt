@@ -1,0 +1,37 @@
+- https://mitbitcoin2026.devpost.com/submissions/991756-utxo-planner/judging (review)
+- https://mitbitcoin2026.devpost.com/submissions/991844-bitlego/judging (review)
+- https://mitbitcoin2026.devpost.com/submissions/992170-cluster-mempool-visualization/judging
+- https://mitbitcoin2026.devpost.com/submissions/992369-barter-bitcoin-lightning-reputation-protocol/judging
+- https://mitbitcoin2026.devpost.com/submissions/991843-cogminers/judging
+- https://mitbitcoin2026.devpost.com/submissions/992373-agent-economy/judging
+- https://mitbitcoin2026.devpost.com/submissions/991831-knowledge-vault/judging
+- https://mitbitcoin2026.devpost.com/submissions/992350-boggles/judging
+- https://mitbitcoin2026.devpost.com/submissions/991942-bitvoice-pay/judging
+- https://mitbitcoin2026.devpost.com/submissions/992437-pay-circle/judging
+- https://mitbitcoin2026.devpost.com/submissions/992459-cogproof/judging
+- https://mitbitcoin2026.devpost.com/submissions/991496-crisischain/judging
+- https://mitbitcoin2026.devpost.com/submissions/992395-aegis-wallet/judging
+- https://mitbitcoin2026.devpost.com/submissions/992200-bitlazarus/judging
+- https://mitbitcoin2026.devpost.com/submissions/992413-liquidity-load-layer-l-3/judging
+- https://mitbitcoin2026.devpost.com/submissions/992058-futurecoin/judging
+- https://mitbitcoin2026.devpost.com/submissions/992473-tribunal/judging
+- https://mitbitcoin2026.devpost.com/submissions/991705-nobell/judging
+- https://mitbitcoin2026.devpost.com/submissions/991485-playergraph/judging
+- https://mitbitcoin2026.devpost.com/submissions/991813-bridgx/judging (review)
+- https://mitbitcoin2026.devpost.com/submissions/991742-eclipse/judging (review)
+- https://mitbitcoin2026.devpost.com/submissions/992137-the-bitcoin-quorum/judging (review)
+
+
+=== Top 11 ===
+- bitlego
+- utxo planner?
+- clustermempool
+- bitvoice pay
+- bitlazarus 
+- aegis wallet
+- nobell
+- liquidity load layer l^3
+- Tribunal
+- barter
+- future coin
+
