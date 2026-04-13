@@ -576,8 +576,10 @@ impl<'a> WalletHandleMut<'a> {
             Action::ContinueParticipateInCospend(bulletin_board_id) => {
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
             }
-            Action::RegisterInput(outpoint) => {
-                self.register_input(outpoint);
+            Action::RegisterInput(outpoints) => {
+                for outpoint in outpoints {
+                    self.register_input(&outpoint);
+                }
             }
         }
     }

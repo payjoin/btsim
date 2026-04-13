@@ -55,7 +55,7 @@ pub(crate) enum Action {
     /// Aggregator creates an aggregate session from pending interests
     CreateAggregateProposal(Vec<CospendInterest>),
     /// Register a single UTXO in the order book (maker action)
-    RegisterInput(Outpoint),
+    RegisterInput(Vec<Outpoint>),
     /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
     Wait,
 }
@@ -405,21 +405,20 @@ impl Strategy for MakerStrategy {
                     .collect()
             })
             .collect();
-        let common_input: Option<Outpoint> = per_action_spent
+        let common_inputs: Vec<Outpoint> = per_action_spent
             .iter()
             .skip(1)
             .fold(
                 per_action_spent.first().cloned().unwrap_or_default(),
                 |acc, s| acc.intersection(s).copied().collect(),
             )
-            .into_iter()
-            .next();
-        if let Some(outpoint) = common_input {
-            if !state.registered_inputs.contains(&outpoint) {
-                actions.push(Action::RegisterInput(outpoint));
-            }
+            .iter()
+            .filter(|o| !state.registered_inputs.contains(o))
+            .copied()
+            .collect();
+        if !common_inputs.is_empty() {
+            actions.push(Action::RegisterInput(common_inputs));
         }
-
         if actions.is_empty() {
             actions.push(Action::Wait);
         }
