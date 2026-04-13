@@ -2,6 +2,7 @@ use bdk_coin_select::{
     metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, DrainWeights, Target,
     TR_DUST_RELAY_MIN_VALUE,
 };
+use bitcoin::Amount;
 use log::warn;
 
 use crate::transaction::Outpoint;
@@ -18,11 +19,17 @@ pub(crate) fn long_term_feerate() -> bdk_coin_select::FeeRate {
     bdk_coin_select::FeeRate::from_sat_per_wu(2.5)
 }
 
-/// Run BNB coin selection over candidates for the given target.
-/// Falls back to greedy selection if BNB finds no solution.
-/// Returns None if no selection can meet the target.
-pub(crate) fn select_bnb(candidates: &[CoinCandidate], target: Target) -> Option<Vec<Outpoint>> {
-    let bdk_candidates: Vec<Candidate> = candidates
+fn change_policy_for(target: Target) -> ChangePolicy {
+    ChangePolicy::min_value_and_waste(
+        DrainWeights::default(),
+        TR_DUST_RELAY_MIN_VALUE,
+        target.fee.rate,
+        long_term_feerate(),
+    )
+}
+
+fn bdk_candidates(candidates: &[CoinCandidate]) -> Vec<Candidate> {
+    candidates
         .iter()
         .map(|c| Candidate {
             value: c.amount_sats,
@@ -30,18 +37,32 @@ pub(crate) fn select_bnb(candidates: &[CoinCandidate], target: Target) -> Option
             input_count: 1,
             is_segwit: c.is_segwit,
         })
-        .collect();
+        .collect()
+}
 
-    let mut coin_selector = CoinSelector::new(&bdk_candidates);
+fn drain_to_change(drain: bdk_coin_select::Drain) -> Vec<Amount> {
+    if drain.value > 0 {
+        vec![Amount::from_sat(drain.value)]
+    } else {
+        vec![]
+    }
+}
 
-    let drain_weights = DrainWeights::default();
-    let dust_limit = TR_DUST_RELAY_MIN_VALUE;
-    let ltfr = long_term_feerate();
-    let change_policy =
-        ChangePolicy::min_value_and_waste(drain_weights, dust_limit, target.fee.rate, ltfr);
+/// Run BNB coin selection over candidates for the given target.
+/// Falls back to greedy selection if BNB finds no solution.
+/// Returns None if no selection can meet the target.
+/// Returns (selected_inputs, change_outputs).
+pub(crate) fn select_bnb(
+    candidates: &[CoinCandidate],
+    target: Target,
+) -> Option<(Vec<Outpoint>, Vec<Amount>)> {
+    let bdk = bdk_candidates(candidates);
+    let mut coin_selector = CoinSelector::new(&bdk);
+
+    let change_policy = change_policy_for(target);
     let metric = LowestFee {
         target,
-        long_term_feerate: ltfr,
+        long_term_feerate: long_term_feerate(),
         change_policy,
     };
 
@@ -52,15 +73,26 @@ pub(crate) fn select_bnb(candidates: &[CoinCandidate], target: Target) -> Option
         }
     }
 
-    Some(
-        coin_selector
-            .apply_selection(candidates)
-            .map(|c| c.outpoint)
-            .collect(),
-    )
+    let inputs = coin_selector
+        .apply_selection(candidates)
+        .map(|c| c.outpoint)
+        .collect();
+    let change = drain_to_change(coin_selector.drain(target, change_policy));
+    Some((inputs, change))
 }
 
-/// Return all candidate outpoints (consolidation / spend-all strategy).
-pub(crate) fn select_all(candidates: &[CoinCandidate]) -> Vec<Outpoint> {
-    candidates.iter().map(|c| c.outpoint).collect()
+/// Select all candidates (consolidation / spend-all strategy).
+/// Returns (selected_inputs, change_outputs).
+pub(crate) fn select_all(
+    candidates: &[CoinCandidate],
+    target: Target,
+) -> (Vec<Outpoint>, Vec<Amount>) {
+    let bdk = bdk_candidates(candidates);
+    let mut coin_selector = CoinSelector::new(&bdk);
+    coin_selector.select_all();
+
+    let change_policy = change_policy_for(target);
+    let inputs = candidates.iter().map(|c| c.outpoint).collect();
+    let change = drain_to_change(coin_selector.drain(target, change_policy));
+    (inputs, change)
 }

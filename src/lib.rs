@@ -64,15 +64,6 @@ impl PrngFactory {
     }
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
- enum CoinSelectionStrategy {
-    FIFO,
-    SpendAll,
-    BNB,
-     // TODO brute force pre-computed for cost function
- }
- 
 // total fee budget
 //   - cap average over entire history, to work within estimated budget overall
 //     - this is a soft fail, resulting in missed payments
@@ -1087,28 +1078,29 @@ mod tests {
             },
         };
 
+        let candidates = alice.with(&sim).coin_candidates();
+        let (selected_outpoints, change_amounts) =
+            crate::coin_selection::select_bnb(&candidates, target)
+                .unwrap_or_else(|| crate::coin_selection::select_all(&candidates, target));
+
         let spend = alice
             .with_mut(&mut sim)
-            .new_tx(|tx, sim| {
-                // TODO use select_coins
-                let (inputs, drain) = alice.with(sim).select_coins(target, None);
-
-                tx.inputs = inputs
-                    .map(|o| Input {
-                        outpoint: o.outpoint,
-                    })
+            .new_tx(|tx, _sim| {
+                tx.inputs = selected_outpoints
+                    .iter()
+                    .map(|op| Input { outpoint: *op })
                     .collect();
 
-                tx.outputs = vec![
-                    Output {
-                        amount: payment.amount,
-                        address_id: bob_payment_addr,
-                    },
-                    Output {
-                        amount: Amount::from_sat(drain.value),
+                tx.outputs = vec![Output {
+                    amount: payment.amount,
+                    address_id: bob_payment_addr,
+                }];
+                for &change_amount in &change_amounts {
+                    tx.outputs.push(Output {
+                        amount: change_amount,
                         address_id: alice_change_addr,
-                    },
-                ];
+                    });
+                }
             })
             .id;
         sim.assert_invariants();
