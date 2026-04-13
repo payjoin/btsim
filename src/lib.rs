@@ -39,6 +39,7 @@ mod macros;
 mod actions;
 mod blocks;
 mod bulletin_board;
+mod coin_selection;
 pub mod config;
 mod cospend;
 mod economic_graph;
@@ -63,16 +64,15 @@ impl PrngFactory {
     }
 }
 
-// all have RBF and non-RBF variants?
 #[derive(Debug)]
 #[allow(dead_code)]
-enum CoinSelectionStrategy {
-    Fifo,
+ enum CoinSelectionStrategy {
+    FIFO,
     SpendAll,
-    Bnb,
-    // TODO brute force pre-computed for cost function
-}
-
+    BNB,
+     // TODO brute force pre-computed for cost function
+ }
+ 
 // total fee budget
 //   - cap average over entire history, to work within estimated budget overall
 //     - this is a soft fail, resulting in missed payments
@@ -1087,16 +1087,11 @@ mod tests {
             },
         };
 
-        let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).unwrap();
-
         let spend = alice
             .with_mut(&mut sim)
             .new_tx(|tx, sim| {
                 // TODO use select_coins
-                let (inputs, drain) =
-                    alice
-                        .with(sim)
-                        .select_coins(target, long_term_feerate, false, None);
+                let (inputs, drain) = alice.with(sim).select_coins(target, None);
 
                 tx.inputs = inputs
                     .map(|o| Input {

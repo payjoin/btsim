@@ -2,11 +2,12 @@ use crate::{
     actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
     blocks::BroadcastSetId,
     bulletin_board::BulletinBoardId,
+    coin_selection::{long_term_feerate, CoinCandidate},
     cospend::UtxoWithMetadata,
     message::{MessageId, MessageType},
     script_type::ScriptType,
     tx_contruction::{MultiPartyPayjoinSession, SentOutputs, SentReadyToSign, TxConstructionState},
-    CoinSelectionStrategy, Simulation, TimeStep,
+    Simulation, TimeStep,
 };
 use bdk_coin_select::{
     metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, Drain, DrainWeights, Target,
@@ -74,13 +75,23 @@ impl<'a> WalletHandle<'a> {
         outputs_amounts
     }
 
+    /// Build coin selection candidates from this wallet's unspent coins.
+    pub(crate) fn coin_candidates(&self) -> Vec<CoinCandidate> {
+        self.unspent_coins()
+            .map(|o| CoinCandidate {
+                outpoint: o.outpoint(),
+                amount_sats: o.data().amount.to_sat(),
+                weight_wu: o.address().data().script_type.input_weight_wu(),
+                is_segwit: o.address().data().script_type.is_segwit(),
+            })
+            .collect()
+    }
+
     // TODO give utxo list as argument so that different variants can be used
     // TODO return change information
     pub(crate) fn select_coins(
         &self,
         target: Target,
-        long_term_feerate: bitcoin::FeeRate,
-        select_all: bool,
         required_inputs: Option<&[Outpoint]>,
     ) -> (impl Iterator<Item = OutputHandle<'a>>, Drain) {
         // TODO change
@@ -104,38 +115,32 @@ impl<'a> WalletHandle<'a> {
             .collect();
 
         let mut coin_selector = CoinSelector::new(&candidates);
-        if select_all {
-            coin_selector.select_all();
-        }
+
         let drain_weights = DrainWeights::default();
-
         let dust_limit = TR_DUST_RELAY_MIN_VALUE;
+        let ltfr = long_term_feerate();
 
-        let long_term_feerate = bdk_coin_select::FeeRate::from_sat_per_wu(
-            long_term_feerate.to_sat_per_kwu() as f32 * 1e-3,
-        );
+        let change_policy =
+            ChangePolicy::min_value_and_waste(drain_weights, dust_limit, target.fee.rate, ltfr);
 
-        let change_policy = ChangePolicy::min_value_and_waste(
-            drain_weights,
-            dust_limit,
-            target.fee.rate,
-            long_term_feerate,
-        );
-
-        let metric = LowestFee {
-            target,
-            long_term_feerate,
-            change_policy,
-        };
-
-        if let Err(err) = coin_selector.run_bnb(metric, 100_000) {
-            // TODO: should be a error log
-            warn!("BNB failed to find a solution: {}", err);
-
-            coin_selector.select_until_target_met(target).expect(
-                "coin selection should always succeed since payments consider budger lower bound",
-            );
-        };
+        if required_inputs.is_some() {
+            // Inputs were pre-selected by the strategy — use them all exactly.
+            // Only compute the change policy; no BNB re-optimization.
+            coin_selector.select_all();
+        } else {
+            let metric = LowestFee {
+                target,
+                long_term_feerate: ltfr,
+                change_policy,
+            };
+            if let Err(err) = coin_selector.run_bnb(metric, 100_000) {
+                // TODO: should be a error log
+                warn!("BNB failed to find a solution: {}", err);
+                coin_selector.select_until_target_met(target).expect(
+                    "coin selection should always succeed since payments consider budget lower bound",
+                );
+            }
+        }
 
         let selection = coin_selector
             .apply_selection(&utxos)
@@ -198,7 +203,6 @@ impl<'a> WalletHandleMut<'a> {
         &mut self,
         payment_obligation_ids: &[PaymentObligationId],
         change_addr: &AddressId,
-        select_all: bool,
         required_inputs: Option<&[Outpoint]>,
     ) -> TxData {
         let mut amount_and_destination = vec![];
@@ -234,11 +238,7 @@ impl<'a> WalletHandleMut<'a> {
                 n_outputs: amount_and_destination.len(),
             },
         };
-        let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).expect("valid fee rate");
-
-        let (selected_coins, drain) =
-            self.handle()
-                .select_coins(target, long_term_feerate, select_all, required_inputs);
+        let (selected_coins, drain) = self.handle().select_coins(target, required_inputs);
         let mut tx = TxData::default();
         let mut outputs = vec![];
         for (amount, address_id) in amount_and_destination.iter() {
@@ -457,12 +457,8 @@ impl<'a> WalletHandleMut<'a> {
     pub(crate) fn do_action(&'a mut self, action: &Action) {
         match action {
             Action::Wait => {}
-            // TODO: the next 3 actions can be folded into one spend action, param'd off # of po's and coin selection strategy. All of them are unilateral
-            Action::UnilateralPayments(po_ids, coin_selection_strategy) => {
-                self.handle_payment_obligations(
-                    po_ids,
-                    matches!(coin_selection_strategy, CoinSelectionStrategy::SpendAll),
-                );
+            Action::UnilateralPayments(po_ids, selected_inputs) => {
+                self.handle_payment_obligations(po_ids, selected_inputs);
             }
             Action::AcceptCospendProposal((message_id, bulletin_board_id)) => {
                 // Aggregator already pre-filled all inputs on the bulletin board.
@@ -557,7 +553,7 @@ impl<'a> WalletHandleMut<'a> {
                 };
                 let change_addr = self.new_address();
                 let full_template =
-                    self.construct_transaction_template(po_ids, &change_addr, false, required);
+                    self.construct_transaction_template(po_ids, &change_addr, required);
                 // Inputs are already pre-filled by the aggregator; broadcast our outputs directly.
                 use crate::bulletin_board::BroadcastMessageType;
                 for output in full_template.outputs.iter() {
@@ -607,15 +603,16 @@ impl<'a> WalletHandleMut<'a> {
     fn handle_payment_obligations(
         &'a mut self,
         payment_obligation_ids: &[PaymentObligationId],
-        select_all_utxos: bool,
+        selected_inputs: &[Outpoint],
     ) {
         let change_addr = self.new_address();
-        let tx_template = self.construct_transaction_template(
-            payment_obligation_ids,
-            &change_addr,
-            select_all_utxos,
-            None,
-        );
+        let required = if selected_inputs.is_empty() {
+            None
+        } else {
+            Some(selected_inputs)
+        };
+        let tx_template =
+            self.construct_transaction_template(payment_obligation_ids, &change_addr, required);
         let tx_id = self.spend_tx(tx_template);
         self.info_mut()
             .txid_to_payment_obligation_ids
