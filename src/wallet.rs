@@ -467,7 +467,10 @@ impl<'a> WalletHandleMut<'a> {
                         BroadcastMessageType::ContributeInputs(op) => Some(op),
                         _ => None,
                     })
-                    .filter(|op| self.info().confirmed_utxos.contains(op))
+                    .filter(|op| {
+                        self.info().confirmed_utxos.contains(op)
+                            && !self.info().unconfirmed_spends.contains(op)
+                    })
                     .map(|op| Input { outpoint: *op })
                     .collect();
                 self.info_mut().active_multi_party_payjoins.insert(
@@ -495,6 +498,16 @@ impl<'a> WalletHandleMut<'a> {
                     .iter()
                     .flat_map(|i| i.utxos.iter())
                     .filter(|u| seen_outpoints.insert(u.outpoint))
+                    // Skip UTXOs that have been spent since the interest was recorded.
+                    // Interests are non-committal and may go stale between proposal and
+                    // aggregation (e.g. the owner spent the coin unilaterally in the same
+                    // tick before the aggregator ran).
+                    .filter(|u| {
+                        let info = &self.sim.wallet_info
+                            [self.sim.wallet_data[u.owner.0].last_wallet_info_id.0];
+                        info.confirmed_utxos.contains(&u.outpoint)
+                            && !info.unconfirmed_spends.contains(&u.outpoint)
+                    })
                     .collect();
                 // Pre-fill all unique inputs on the bulletin board
                 for u in &unique_utxos {

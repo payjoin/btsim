@@ -1,7 +1,7 @@
 [simulation]
 seed = 42
-max_timestep = 40
-num_payment_obligations = 10
+max_timestep = 15
+num_payment_obligations = 5
 
 # Takers: have payment obligations, build cospend proposals using the order book
 [[wallet_types]]
@@ -30,6 +30,7 @@ payment_obligation_weight = 1.0
 coordination_weight = 2.0
 
 # Aggregators: create aggregate proposals from pending interests
+# For now they are a distinct role that should not have payment obligations
 [[wallet_types]]
 name = "aggregator"
 count = 1

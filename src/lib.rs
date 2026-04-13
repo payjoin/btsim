@@ -608,7 +608,10 @@ impl<'a> Simulation {
                 let info = &self.wallet_info[wallet.last_wallet_info_id.0];
                 info.registered_inputs
                     .iter()
-                    .filter(|outpoint| info.confirmed_utxos.contains(outpoint))
+                    .filter(|outpoint| {
+                        info.confirmed_utxos.contains(outpoint)
+                            && !info.unconfirmed_spends.contains(outpoint)
+                    })
                     .map(|outpoint| UtxoWithMetadata {
                         outpoint: *outpoint,
                         amount: outpoint.with(self).data().amount,
