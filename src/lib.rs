@@ -27,7 +27,7 @@ use crate::{
     economic_graph::EconomicGraph,
     message::{MessageData, MessageId},
     script_type::ScriptType,
-    transaction::{InputId, Outpoint, TxData, TxHandle, TxId, TxInfo},
+    transaction::{InputId, Outpoint, TxData, TxId, TxInfo},
     wallet::{
         AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData,
         WalletHandle, WalletId, WalletInfo, WalletInfoId,
@@ -149,10 +149,10 @@ enum CoinSelectionStrategy {
 // TODO handle enum for broadcastset data?
 //
 
- // TODO: unsued do we need this?
- // #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
- // struct TxByFeerate(FeeRate, TxId);
- 
+// TODO: unsued do we need this?
+// #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+// struct TxByFeerate(FeeRate, TxId);
+
 // Wrapper type for timestep index
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
 pub(crate) struct TimeStep(u64);
@@ -424,11 +424,6 @@ impl<'a> Simulation {
             from,
             to,
         });
-    }
-
-    // TODO remove
-    fn get_tx(&'a self, id: TxId) -> TxHandle<'a> {
-        id.with(self)
     }
 
     /// Creates a random payment obligation between two wallets.
@@ -774,9 +769,9 @@ impl SimulationResult {
             .block_data
             .iter()
             .map(|block| {
-                let mut block_weight_wu = self.sim.get_tx(block.coinbase_tx).info().weight.to_wu();
+                let mut block_weight_wu = block.coinbase_tx.with(&self.sim).info().weight.to_wu();
                 for txid in &block.confirmed_txs {
-                    block_weight_wu += self.sim.get_tx(*txid).info().weight.to_wu();
+                    block_weight_wu += txid.with(&self.sim).info().weight.to_wu();
                 }
                 block_weight_wu
             })
