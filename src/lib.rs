@@ -149,10 +149,10 @@ enum CoinSelectionStrategy {
 // TODO handle enum for broadcastset data?
 //
 
-// TODO: unsued do we need this?
-// #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-// struct TxByFeerate(FeeRate, TxId);
-
+ // TODO: unsued do we need this?
+ // #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+ // struct TxByFeerate(FeeRate, TxId);
+ 
 // Wrapper type for timestep index
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
 pub(crate) struct TimeStep(u64);
@@ -189,10 +189,6 @@ impl SimulationBuilder {
         }
     }
 
-    fn total_wallets(&self) -> usize {
-        self.wallet_types.iter().map(|wt| wt.count).sum()
-    }
-
     pub fn build(self) -> Simulation {
         let mut prng_factory = PrngFactory::new(self.seed);
         let economic_graph_prng = prng_factory.generate_prng();
@@ -219,7 +215,6 @@ impl SimulationBuilder {
             cospend_interests: Vec::new(),
             economic_graph: EconomicGraph::new(3, economic_graph_prng),
             config: SimulationConfig {
-                num_wallets: self.total_wallets(),
                 max_timestep: self.max_timestep,
                 block_interval: self.block_interval,
                 num_payment_obligations: self.num_payment_obligations,
@@ -292,8 +287,6 @@ impl SimulationBuilder {
 
 #[derive(Debug, Clone)]
 struct SimulationConfig {
-    #[allow(dead_code)]
-    num_wallets: usize,
     max_timestep: TimeStep,
     block_interval: u64,
     num_payment_obligations: usize,
