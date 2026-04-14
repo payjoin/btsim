@@ -4,7 +4,6 @@ use bitcoin::{Amount, Weight};
 use graphviz_rust::{cmd::Format, dot_structures, printer::PrinterContext};
 use im::{OrdMap, OrdSet, Vector};
 use log::info;
-use petgraph::graph::{NodeIndex, UnGraph};
 use rand::Rng;
 use rand_distr::Distribution;
 use rand_distr::Geometric;
@@ -156,12 +155,7 @@ enum CoinSelectionStrategy {
 // #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 // struct TxByFeerate(FeeRate, TxId);
 
-#[derive(Debug, Clone)]
-// TODO: use WalletId instead of usize?
-#[allow(dead_code)]
-struct PeerGraph(UnGraph<usize, ()>);
-
-/// Wrapper type for timestep index
+// Wrapper type for timestep index
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
 pub(crate) struct TimeStep(u64);
 
@@ -201,28 +195,10 @@ impl SimulationBuilder {
         self.wallet_types.iter().map(|wt| wt.count).sum()
     }
 
-    fn create_fully_connected_peer_graph(&self) -> PeerGraph {
-        let num_wallets = self.total_wallets();
-        let mut nodes: Vec<(usize, usize)> = Vec::new();
-        for i in 0..num_wallets {
-            for j in 0..num_wallets {
-                if i != j {
-                    nodes.push((i, j));
-                }
-            }
-        }
-        PeerGraph(UnGraph::<usize, ()>::from_edges(
-            nodes
-                .into_iter()
-                .map(|(i, j)| (NodeIndex::new(i), NodeIndex::new(j))),
-        ))
-    }
-
     pub fn build(self) -> Simulation {
         let mut prng_factory = PrngFactory::new(self.seed);
         let economic_graph_prng = prng_factory.generate_prng();
         let mut sim = Simulation {
-            peer_graph: self.create_fully_connected_peer_graph(),
             wallet_data: Vec::new(),
             payment_data: Vec::new(),
             address_data: vec![AddressData {
@@ -338,8 +314,6 @@ pub struct Simulation {
     block_data: Vec<BlockData>,
     current_timestep: TimeStep,
     prng_factory: PrngFactory,
-    #[allow(dead_code)]
-    peer_graph: PeerGraph,
     economic_graph: EconomicGraph<Pcg64>,
     config: SimulationConfig,
     /// Append only vector of p2p messages
