@@ -63,8 +63,6 @@ impl PrngFactory {
     }
 }
 
-// TODO use bitcoin::transaction::predict_weight(inputs: IntoIter<InputWeightPrediction>, output_lengths: IntoIter<u64>)
-
 // all have RBF and non-RBF variants?
 #[derive(Debug)]
 #[allow(dead_code)]
