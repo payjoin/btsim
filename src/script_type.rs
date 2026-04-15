@@ -1,18 +1,13 @@
 use bitcoin::transaction::InputWeightPrediction;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptType {
+    #[default]
     P2tr,
     P2wpkh,
     P2pkh,
-}
-
-impl Default for ScriptType {
-    fn default() -> Self {
-        ScriptType::P2tr
-    }
 }
 
 impl ScriptType {

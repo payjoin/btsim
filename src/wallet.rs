@@ -66,6 +66,7 @@ impl<'a> WalletHandle<'a> {
 
     // TODO: this should take into account liabilties spending unconfirmed UTXOs. For which a CPFP cost model is needed
     // In the future in needs to take as arg the current mempool and somethign to predict the state of the mempool overtime
+    #[allow(dead_code)]
     pub(crate) fn effective_balance(&self) -> Amount {
         let utxos: Vec<OutputHandle<'a>> = self.unspent_coins().collect();
         let outputs_amounts = utxos.iter().map(|output| output.data().amount).sum();
@@ -158,7 +159,7 @@ impl<'a> WalletHandle<'a> {
         self.potentially_spendable_txos()
             .filter(|o| !self.info().unconfirmed_spends.contains(&o.outpoint()))
     }
-
+    #[allow(dead_code)]
     fn double_spendable_coins(&self) -> impl Iterator<Item = OutputHandle<'a>> + '_ {
         self.potentially_spendable_txos()
             .filter(|o| self.info().unconfirmed_spends.contains(&o.outpoint()))
@@ -562,7 +563,7 @@ impl<'a> WalletHandleMut<'a> {
                 for output in full_template.outputs.iter() {
                     self.sim.add_message_to_bulletin_board(
                         *bulletin_board_id,
-                        BroadcastMessageType::ContributeOutputs(output.clone()),
+                        BroadcastMessageType::ContributeOutputs(*output),
                     );
                 }
                 let session = self
@@ -578,7 +579,7 @@ impl<'a> WalletHandleMut<'a> {
             }
             Action::RegisterInput(outpoints) => {
                 for outpoint in outpoints {
-                    self.register_input(&outpoint);
+                    self.register_input(outpoint);
                 }
             }
         }

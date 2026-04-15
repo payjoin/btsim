@@ -178,6 +178,7 @@ impl From<Output> for bitcoin::transaction::TxOut {
 }
 
 impl Output {
+    #[allow(dead_code)]
     fn script_pubkey_len(&self, sim: &Simulation) -> usize {
         self.address(sim).data().script_type.output_script_len()
     }
@@ -190,6 +191,7 @@ impl Output {
         self.address(sim).wallet()
     }
 
+    #[allow(dead_code)]
     fn wallet_mut<'a>(&self, sim: &'a mut Simulation) -> WalletHandleMut<'a> {
         let owner_id = self.address(sim).data().wallet_id;
         owner_id.with_mut(sim)
@@ -229,6 +231,7 @@ impl<'a> OutputHandle<'a> {
         self.data().wallet(self.sim)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn wallet_mut<'b>(&self, sim: &'b mut Simulation) -> WalletHandleMut<'b> {
         self.data().wallet_mut(sim)
     }
@@ -279,6 +282,7 @@ impl<'a> TxHandle<'a> {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_confirmed(&self) -> bool {
         self.sim
             .block_data
@@ -290,6 +294,8 @@ impl<'a> TxHandle<'a> {
     // TODO previous txs
 }
 
+#[allow(clippy::derivable_impls)]
+#[allow(dead_code)]
 impl Default for TxData {
     fn default() -> Self {
         Self {
@@ -364,10 +370,10 @@ impl TxInfo {
     pub(crate) fn new(tx: &TxData, sim: &Simulation) -> Self {
         // TODO Result with invalid txn error?
         // TODO refactor into a method.. on Simulation? on tx accepting simulation?
-        let prevouts = tx.inputs.iter().map(|i| i.outpoint.with(&sim));
+        let prevouts = tx.inputs.iter().map(|i| i.outpoint.with(sim));
 
         let weight = predict_weight(
-            prevouts.clone().map(|i| InputWeightPrediction::from(i)),
+            prevouts.clone().map(InputWeightPrediction::from),
             tx.outputs.iter().map(|o| o.script_pubkey_len(sim)),
         );
 

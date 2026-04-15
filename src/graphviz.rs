@@ -60,7 +60,7 @@ impl Simulation {
             // TODO default to broadcast txs, not all created txs?
             // 1.. to skip genesis coinbase
             txs = (1..self.tx_data.len())
-                .map(|i| crate::transaction::TxId(i))
+                .map(crate::transaction::TxId)
                 .collect();
         }
 
@@ -251,7 +251,7 @@ pub fn format_min_hamming_weight_sats(n: u64) -> String {
     }
 
     fn is_power_of_three(n: u64) -> bool {
-        n > 0 && largest_pow_under(3, 2.1e15 as u64) % n == 0
+        n > 0 && largest_pow_under(3, 2.1e15 as u64).is_multiple_of(n)
     }
 
     fn power_of_two_exponent(n: u64) -> u64 {
@@ -286,13 +286,13 @@ pub fn format_min_hamming_weight_sats(n: u64) -> String {
     // Check if the number is a power of two
     if is_power_of_two(n) {
         let exponent = power_of_two_exponent(n);
-        return format!("2{}", unicode_exponent(exponent));
+        format!("2{}", unicode_exponent(exponent))
     } else if is_power_of_three(n) {
         let exponent = power_of_three_exponent(n);
-        return format!("3{}", unicode_exponent(exponent));
+        format!("3{}", unicode_exponent(exponent))
     } else if is_power_of_three(n >> 1) {
         let exponent = power_of_three_exponent(n);
-        return format!("2×3{}", unicode_exponent(exponent));
+        format!("2×3{}", unicode_exponent(exponent))
     } else {
         // TODO refactor to make factor extraction the same code path for base 3 and base 10
         for factor in [1, 2, 5] {

@@ -15,12 +15,14 @@ pub(crate) struct CospendInterest {
     pub(crate) utxos: Vec<UtxoWithMetadata>,
 }
 
+#[allow(dead_code)]
 fn amount_distance(a: Amount, b: Amount) -> u64 {
     a.to_sat().abs_diff(b.to_sat())
 }
 
 /// Returns order book entries sorted by value asymmetry relative to the given reference UTXOs.
 /// Each entry is scored by the minimum amount distance to any reference UTXO.
+#[allow(dead_code)]
 pub(crate) fn generate_candidates(
     order_book: &[UtxoWithMetadata],
     reference_utxos: &[UtxoWithMetadata],
