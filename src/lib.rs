@@ -4,7 +4,6 @@ use bitcoin::{Amount, Weight};
 use graphviz_rust::{cmd::Format, dot_structures, printer::PrinterContext};
 use im::{OrdMap, OrdSet, Vector};
 use log::info;
-use petgraph::graph::{NodeIndex, UnGraph};
 use rand::Rng;
 use rand_distr::Distribution;
 use rand_distr::Geometric;
@@ -28,7 +27,7 @@ use crate::{
     economic_graph::EconomicGraph,
     message::{MessageData, MessageId},
     script_type::ScriptType,
-    transaction::{InputId, Outpoint, TxData, TxHandle, TxId, TxInfo},
+    transaction::{InputId, Outpoint, TxData, TxId, TxInfo},
     wallet::{
         AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData,
         WalletHandle, WalletId, WalletInfo, WalletInfoId,
@@ -63,8 +62,6 @@ impl PrngFactory {
         Pcg64::seed_from_u64(seed)
     }
 }
-
-// TODO use bitcoin::transaction::predict_weight(inputs: IntoIter<InputWeightPrediction>, output_lengths: IntoIter<u64>)
 
 // all have RBF and non-RBF variants?
 #[derive(Debug)]
@@ -156,12 +153,7 @@ enum CoinSelectionStrategy {
 // #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 // struct TxByFeerate(FeeRate, TxId);
 
-#[derive(Debug, Clone)]
-// TODO: use WalletId instead of usize?
-#[allow(dead_code)]
-struct PeerGraph(UnGraph<usize, ()>);
-
-/// Wrapper type for timestep index
+// Wrapper type for timestep index
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
 pub(crate) struct TimeStep(u64);
 
@@ -197,32 +189,10 @@ impl SimulationBuilder {
         }
     }
 
-    fn total_wallets(&self) -> usize {
-        self.wallet_types.iter().map(|wt| wt.count).sum()
-    }
-
-    fn create_fully_connected_peer_graph(&self) -> PeerGraph {
-        let num_wallets = self.total_wallets();
-        let mut nodes: Vec<(usize, usize)> = Vec::new();
-        for i in 0..num_wallets {
-            for j in 0..num_wallets {
-                if i != j {
-                    nodes.push((i, j));
-                }
-            }
-        }
-        PeerGraph(UnGraph::<usize, ()>::from_edges(
-            nodes
-                .into_iter()
-                .map(|(i, j)| (NodeIndex::new(i), NodeIndex::new(j))),
-        ))
-    }
-
     pub fn build(self) -> Simulation {
         let mut prng_factory = PrngFactory::new(self.seed);
         let economic_graph_prng = prng_factory.generate_prng();
         let mut sim = Simulation {
-            peer_graph: self.create_fully_connected_peer_graph(),
             wallet_data: Vec::new(),
             payment_data: Vec::new(),
             address_data: vec![AddressData {
@@ -245,7 +215,6 @@ impl SimulationBuilder {
             cospend_interests: Vec::new(),
             economic_graph: EconomicGraph::new(3, economic_graph_prng),
             config: SimulationConfig {
-                num_wallets: self.total_wallets(),
                 max_timestep: self.max_timestep,
                 block_interval: self.block_interval,
                 num_payment_obligations: self.num_payment_obligations,
@@ -318,8 +287,6 @@ impl SimulationBuilder {
 
 #[derive(Debug, Clone)]
 struct SimulationConfig {
-    #[allow(dead_code)]
-    num_wallets: usize,
     max_timestep: TimeStep,
     block_interval: u64,
     num_payment_obligations: usize,
@@ -338,8 +305,6 @@ pub struct Simulation {
     block_data: Vec<BlockData>,
     current_timestep: TimeStep,
     prng_factory: PrngFactory,
-    #[allow(dead_code)]
-    peer_graph: PeerGraph,
     economic_graph: EconomicGraph<Pcg64>,
     config: SimulationConfig,
     /// Append only vector of p2p messages
@@ -459,11 +424,6 @@ impl<'a> Simulation {
             from,
             to,
         });
-    }
-
-    // TODO remove
-    fn get_tx(&'a self, id: TxId) -> TxHandle<'a> {
-        id.with(self)
     }
 
     /// Creates a random payment obligation between two wallets.
@@ -809,9 +769,9 @@ impl SimulationResult {
             .block_data
             .iter()
             .map(|block| {
-                let mut block_weight_wu = self.sim.get_tx(block.coinbase_tx).info().weight.to_wu();
+                let mut block_weight_wu = block.coinbase_tx.with(&self.sim).info().weight.to_wu();
                 for txid in &block.confirmed_txs {
-                    block_weight_wu += self.sim.get_tx(*txid).info().weight.to_wu();
+                    block_weight_wu += txid.with(&self.sim).info().weight.to_wu();
                 }
                 block_weight_wu
             })

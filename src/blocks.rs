@@ -257,7 +257,7 @@ impl<'a> BroadcastSetHandleMut<'a> {
         self.info()
             .unconfirmed_txs
             .iter()
-            .map(|tx| self.sim.get_tx(*tx))
+            .map(|tx| tx.with(self.sim))
     }
 
     pub(crate) fn broadcast(self, txs: impl IntoIterator<Item = TxId>) -> Self {
@@ -368,7 +368,7 @@ impl<'a> BlockTemplate {
         let height = 1 + parent_block.info().height;
         let subsidy = ChainParams::default().subsidy(height); // TODO make parameter of simulation
 
-        let fees = self.txs.iter().map(|tx| sim.get_tx(*tx).info().fee).sum();
+        let fees = self.txs.iter().map(|tx| tx.with(sim).info().fee).sum();
 
         let block_rewards = subsidy + fees;
 
@@ -452,6 +452,6 @@ impl<'a> BlockHandle<'a> {
     }
 
     pub(crate) fn coinbase_tx(&self) -> TxHandle<'_> {
-        self.sim.get_tx(self.data().coinbase_tx)
+        self.data().coinbase_tx.with(self.sim)
     }
 }

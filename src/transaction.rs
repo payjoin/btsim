@@ -124,7 +124,7 @@ pub(crate) struct InputHandle<'a> {
 
 impl<'a> InputHandle<'a> {
     pub(crate) fn data(&self) -> &'a Input {
-        &self.sim.get_tx(self.id.txid).data().inputs[self.id.index]
+        &self.id.txid.with(self.sim).data().inputs[self.id.index]
     }
 
     pub(crate) fn prevout(&self) -> OutputHandle<'a> {
@@ -220,7 +220,7 @@ impl<'a> OutputHandle<'a> {
     }
 
     pub(crate) fn data(&self) -> &'a Output {
-        &self.sim.get_tx(self.outpoint.txid).data().outputs[self.outpoint.index]
+        &self.outpoint.txid.with(self.sim).data().outputs[self.outpoint.index]
     }
 
     pub(crate) fn address(&'a self) -> AddressHandle<'a> {
