@@ -63,6 +63,7 @@ pub(crate) enum Action {
 /// Predicted diff of wallet state resulting from taking an action.
 /// Each field corresponds to one category of state change.
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub(crate) struct PredictedOutcome {
     /// Payment obligations fulfilled by this action
     pub(crate) payment_obligations_handled: Vec<PaymentObligationId>,
@@ -237,7 +238,7 @@ pub(crate) trait Strategy: std::fmt::Debug {
     fn clone_box(&self) -> Box<dyn Strategy>;
 }
 
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Debug, PartialEq)]
 // TODO: this should just be bitcoin::Amount
 pub(crate) struct ActionCost(f64);
 
@@ -256,6 +257,12 @@ impl Ord for ActionCost {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         assert!(!self.0.is_nan() && !other.0.is_nan());
         self.0.partial_cmp(&other.0).expect("Checked for NaNs")
+    }
+}
+
+impl PartialOrd for ActionCost {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -283,7 +290,7 @@ impl Strategy for UnilateralSpender {
         for po in state.payment_obligations.iter() {
             actions.push(Action::UnilateralPayments(
                 vec![po.id],
-                CoinSelectionStrategy::BNB,
+                CoinSelectionStrategy::Bnb,
             ));
         }
         actions
@@ -338,7 +345,7 @@ impl Strategy for BatchSpender {
             state.payment_obligations.iter().map(|po| po.id).collect();
         vec![Action::UnilateralPayments(
             payment_obligation_ids,
-            CoinSelectionStrategy::BNB,
+            CoinSelectionStrategy::Bnb,
         )]
     }
 
@@ -364,7 +371,7 @@ impl Strategy for MakerStrategy {
         }
 
         // Accept new invitations. TODO: in the future makers will be have certain preferences for which invitations to accept.
-        if let Some((bulletin_board_id, message_id)) = state.cospend_proposals.iter().next() {
+        if let Some((bulletin_board_id, message_id)) = state.cospend_proposals.first() {
             if state.active_cospends.is_empty() {
                 actions.push(Action::AcceptCospendProposal((
                     *message_id,
@@ -460,7 +467,7 @@ impl Strategy for TakerStrategy {
         }
 
         // Accept any pending invitations from the aggregator before proposing new ones.
-        if let Some((bulletin_board_id, message_id)) = state.cospend_proposals.iter().next() {
+        if let Some((bulletin_board_id, message_id)) = state.cospend_proposals.first() {
             return vec![Action::AcceptCospendProposal((
                 *message_id,
                 *bulletin_board_id,
@@ -652,7 +659,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(actions
             .iter()
-            .any(|a| matches!(a, Action::UnilateralPayments(ids, CoinSelectionStrategy::BNB) if ids.len() == 1)));
+            .any(|a| matches!(a, Action::UnilateralPayments(ids, CoinSelectionStrategy::Bnb) if ids.len() == 1)));
     }
 
     #[test]
@@ -679,7 +686,7 @@ mod tests {
             .any(|a| matches!(a, Action::UnilateralPayments(ids, CoinSelectionStrategy::SpendAll) if ids.len() == 1)));
         assert!(!actions
             .iter()
-            .any(|a| matches!(a, Action::UnilateralPayments(_, CoinSelectionStrategy::BNB))));
+            .any(|a| matches!(a, Action::UnilateralPayments(_, CoinSelectionStrategy::Bnb))));
     }
 
     #[test]
@@ -749,7 +756,7 @@ mod tests {
 
         let single_po_count = actions
             .iter()
-            .filter(|a| matches!(a, Action::UnilateralPayments(ids, CoinSelectionStrategy::BNB) if ids.len() == 1))
+            .filter(|a| matches!(a, Action::UnilateralPayments(ids, CoinSelectionStrategy::Bnb) if ids.len() == 1))
             .count();
         assert_eq!(single_po_count, 2);
 

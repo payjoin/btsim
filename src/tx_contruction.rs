@@ -49,12 +49,13 @@ impl<'a> SentOutputs<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn read_txout_messages(&self) -> Vec<Output> {
         let messages = self.sim.bulletin_boards[self.bulletin_board_id.0]
             .messages
             .iter()
             .filter_map(|message| match message {
-                BroadcastMessageType::ContributeOutputs(output) => Some(output.clone()),
+                BroadcastMessageType::ContributeOutputs(output) => Some(*output),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -290,7 +291,7 @@ mod tests {
         for output in tx_template.outputs.iter() {
             sim.add_message_to_bulletin_board(
                 bulletin_board_id,
-                BroadcastMessageType::ContributeOutputs(output.clone()),
+                BroadcastMessageType::ContributeOutputs(*output),
             );
         }
 

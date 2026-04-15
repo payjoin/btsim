@@ -2,7 +2,6 @@ use bitcoin::{Amount, Weight};
 use im::OrdSet;
 
 use crate::{
-    define_entity,
     transaction::{Outpoint, Output, TxHandle, TxId},
     wallet::{AddressId, WalletHandle, WalletId, WalletInfo, WalletInfoId},
     Simulation,
@@ -12,6 +11,7 @@ use crate::{
 pub(crate) struct ChainParams {
     initial_subsidy: Amount,
     halving_interval: usize,
+    #[allow(dead_code)]
     max_block_weight: Weight,
 }
 
@@ -98,7 +98,7 @@ impl<'a> BroadcastSetHandleMut<'a> {
         let mut invalidated_txs = self.info().invalidated_txs.clone();
 
         for tx in block.data().txs() {
-            unconfirmed_txs.remove(&tx);
+            unconfirmed_txs.remove(tx);
 
             let tx = tx.with(self.sim);
             // also remove conflicting transactions
@@ -145,11 +145,11 @@ impl<'a> BroadcastSetHandleMut<'a> {
 
         let mut update_wallet_info = |wallet: &WalletHandle, update: &dyn Fn(&mut WalletInfo)| {
             // impl not allowed in closure but rustc suggests adding it?
-            if !wallet_infos.contains_key(&wallet.id) {
+            wallet_infos.entry(wallet.id).or_insert_with(|| {
                 let mut new_info = wallet.info().clone();
                 new_info.broadcast_set_id = id;
-                wallet_infos.insert(wallet.id, new_info);
-            }
+                new_info
+            });
 
             update(wallet_infos.get_mut(&wallet.id).unwrap())
         };
@@ -203,7 +203,7 @@ impl<'a> BroadcastSetHandleMut<'a> {
                                 info.txid_to_payment_obligation_ids.get(tx)
                             {
                                 info.handled_payment_obligations
-                                    .extend(payment_obligation_ids.iter().map(|id| *id));
+                                    .extend(payment_obligation_ids.iter().copied());
 
                                 for (_, mppj_session) in info.active_multi_party_payjoins.iter() {
                                     if mppj_session
@@ -227,10 +227,10 @@ impl<'a> BroadcastSetHandleMut<'a> {
                         update_wallet_info(&wallet, &|info: &mut WalletInfo| {
                             // TODO no .contains() check needed if checking self.all_txs?
                             // FIXME O(n) + O(n) contains()
-                            if !wallet.data().own_transactions.contains(tx) {
-                                if !info.received_transactions.contains(tx) {
-                                    info.received_transactions.push_back(*tx);
-                                }
+                            if !wallet.data().own_transactions.contains(tx)
+                                && !info.received_transactions.contains(tx)
+                            {
+                                info.received_transactions.push_back(*tx);
                             }
                             info.confirmed_utxos.insert(output.outpoint);
                             info.unconfirmed_txos.remove(&output.outpoint);
@@ -426,19 +426,20 @@ impl<'a> BlockTemplate {
 }
 
 impl BlockData {
-    fn txs<'a>(&'a self) -> impl Iterator<Item = &TxId> {
+    fn txs(&self) -> impl Iterator<Item = &TxId> {
         // TODO why is confirmed_txs by ref?
         std::iter::once(&self.coinbase_tx).chain(self.confirmed_txs.iter())
     }
 }
 
+#[allow(dead_code)]
 impl<'a> BlockHandle<'a> {
     pub(crate) fn data(&self) -> &'a BlockData {
         &self.sim.block_data[self.id.0]
     }
 
     // TODO TxHandle
-    pub(crate) fn txs(&'a self) -> impl Iterator<Item = &'a TxId> {
+    pub(crate) fn txs(&self) -> impl Iterator<Item = &'a TxId> {
         self.data().txs()
     }
 
@@ -450,7 +451,7 @@ impl<'a> BlockHandle<'a> {
         self.data().parent.map(|id| Self { sim: self.sim, id })
     }
 
-    pub(crate) fn coinbase_tx(&self) -> TxHandle {
+    pub(crate) fn coinbase_tx(&self) -> TxHandle<'_> {
         self.sim.get_tx(self.data().coinbase_tx)
     }
 }

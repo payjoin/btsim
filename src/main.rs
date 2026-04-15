@@ -18,7 +18,7 @@ fn main() {
     let config_path = env::var("CONFIG_FILE").unwrap_or_else(|_| "config.toml".to_string());
 
     let config = btsim::config::Config::from_file(&config_path)
-        .expect(&format!("Failed to parse config file: {}", config_path));
+        .unwrap_or_else(|_| panic!("Failed to parse config file: {}", config_path));
 
     let seed = config.simulation.seed.unwrap_or(42);
     let mut sim = btsim::SimulationBuilder::new(

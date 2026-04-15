@@ -8,6 +8,7 @@ pub(crate) struct UTXORegisteration {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
+#[allow(dead_code)]
 pub(crate) enum MessageType {
     /// Initiate a multi-party payjoin (shared bulletin board id for all participants).
     ProposeCoSpend(BulletinBoardId),
@@ -30,12 +31,14 @@ define_entity!(
 define_entity_handle_mut!(Message);
 
 impl<'a> MessageHandle<'a> {
+    #[allow(dead_code)]
     pub(crate) fn data(&self) -> &'a MessageData {
         &self.sim.messages[self.id.0]
     }
 }
 
 impl<'a> MessageHandleMut<'a> {
+    #[allow(dead_code)]
     pub(crate) fn post(&mut self, message: MessageData) {
         self.sim.messages.push(message);
     }

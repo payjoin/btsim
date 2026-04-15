@@ -68,10 +68,11 @@ impl PrngFactory {
 
 // all have RBF and non-RBF variants?
 #[derive(Debug)]
+#[allow(dead_code)]
 enum CoinSelectionStrategy {
-    FIFO,
+    Fifo,
     SpendAll,
-    BNB,
+    Bnb,
     // TODO brute force pre-computed for cost function
 }
 
@@ -157,6 +158,7 @@ enum CoinSelectionStrategy {
 
 #[derive(Debug, Clone)]
 // TODO: use WalletId instead of usize?
+#[allow(dead_code)]
 struct PeerGraph(UnGraph<usize, ()>);
 
 /// Wrapper type for timestep index
@@ -316,6 +318,7 @@ impl SimulationBuilder {
 
 #[derive(Debug, Clone)]
 struct SimulationConfig {
+    #[allow(dead_code)]
     num_wallets: usize,
     max_timestep: TimeStep,
     block_interval: u64,
@@ -335,6 +338,7 @@ pub struct Simulation {
     block_data: Vec<BlockData>,
     current_timestep: TimeStep,
     prng_factory: PrngFactory,
+    #[allow(dead_code)]
     peer_graph: PeerGraph,
     economic_graph: EconomicGraph<Pcg64>,
     config: SimulationConfig,
@@ -368,7 +372,7 @@ impl<'a> Simulation {
         // For now we just mine a coinbase transaction for each wallet
         let mut i = 0;
         for address in addresses.iter() {
-            for _ in 0..prng.gen_range(5..10) {
+            for _ in 0..prng.random_range(5..10) {
                 let _ = BroadcastSetHandleMut {
                     id: BroadcastSetId(i),
                     sim: self,
@@ -404,7 +408,11 @@ impl<'a> Simulation {
             wallet_id.with_mut(self).wake_up();
         }
 
-        if self.current_timestep.0 % self.config.block_interval == 0 {
+        if self
+            .current_timestep
+            .0
+            .is_multiple_of(self.config.block_interval)
+        {
             info!("Mining block");
             let bx_id = BroadcastSetId(self.broadcast_set_data.len() - 1);
             let bx_set_handle = bx_id.with_mut(self);
@@ -455,7 +463,7 @@ impl<'a> Simulation {
 
     // TODO remove
     fn get_tx(&'a self, id: TxId) -> TxHandle<'a> {
-        id.with(&self)
+        id.with(self)
     }
 
     /// Creates a random payment obligation between two wallets.
@@ -472,7 +480,7 @@ impl<'a> Simulation {
                 debug_assert!(from != to, "circular payment obligation");
                 // TODO: should be a configurable or dependent on the balance of each wallet?
                 let reveal_time =
-                    prng.gen_range(current_timestep + 1..self.config.max_timestep.0 / 2); // Payments shouldnt be revealed too late. Aim to have them revealed within the first half of the simulation.
+                    prng.random_range(current_timestep + 1..self.config.max_timestep.0 / 2); // Payments shouldnt be revealed too late. Aim to have them revealed within the first half of the simulation.
                 let deadline = reveal_time
                     + std::cmp::min(
                         self.config.max_timestep.0,
@@ -556,7 +564,7 @@ impl<'a> Simulation {
         let txid = TxId(self.tx_data.len());
         let mut tx = TxData::default();
 
-        build(&mut tx, &self);
+        build(&mut tx, self);
 
         let tx_info = TxInfo::new(&tx, self);
 
@@ -1127,7 +1135,7 @@ mod tests {
                 // TODO use select_coins
                 let (inputs, drain) =
                     alice
-                        .with(&sim)
+                        .with(sim)
                         .select_coins(target, long_term_feerate, false, None);
 
                 tx.inputs = inputs
@@ -1218,7 +1226,7 @@ mod tests {
             .with(&sim)
             .info()
             .confirmed_utxos
-            .contains(&spend.with(&sim).outpoints().nth(0).unwrap()));
+            .contains(&spend.with(&sim).outpoints().next().unwrap()));
 
         // Verify the spend transaction is no longer unconfirmed
         assert!(alice.with(&sim).info().unconfirmed_txos.is_empty());
