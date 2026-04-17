@@ -12,7 +12,7 @@ macro_rules! define_entity_id_and_handle {
             #[allow(dead_code)]
             pub(crate) struct [<$base Handle>]<'a> {
 
-                sim: &'a crate::Simulation,
+                pub(crate) sim: &'a crate::Simulation,
                 pub(crate) id: [<$base Id>],
             }
 
