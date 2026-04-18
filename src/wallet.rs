@@ -2,19 +2,16 @@ use crate::{
     actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
     blocks::BroadcastSetId,
     bulletin_board::BulletinBoardId,
+    coin_selection::CoinCandidate,
     cospend::UtxoWithMetadata,
     message::{MessageId, MessageType},
     script_type::ScriptType,
     tx_contruction::{MultiPartyPayjoinSession, SentOutputs, SentReadyToSign, TxConstructionState},
-    CoinSelectionStrategy, Simulation, TimeStep,
-};
-use bdk_coin_select::{
-    metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, Drain, DrainWeights, Target,
-    TargetFee, TargetOutputs, TR_DUST_RELAY_MIN_VALUE,
+    Simulation, TimeStep,
 };
 use bitcoin::{transaction::InputWeightPrediction, Amount};
 use im::{HashMap, OrdSet, Vector};
-use log::{info, warn};
+use log::info;
 
 use crate::transaction::*;
 
@@ -74,77 +71,32 @@ impl<'a> WalletHandle<'a> {
         outputs_amounts
     }
 
-    // TODO give utxo list as argument so that different variants can be used
-    // TODO return change information
-    pub(crate) fn select_coins(
-        &self,
-        target: Target,
-        long_term_feerate: bitcoin::FeeRate,
-        select_all: bool,
-        required_inputs: Option<&[Outpoint]>,
-    ) -> (impl Iterator<Item = OutputHandle<'a>>, Drain) {
-        // TODO change
-        // TODO group by address
-        let utxos: Vec<OutputHandle<'a>> = match required_inputs {
-            Some(required) => self
-                .unspent_coins()
-                .filter(|o| required.contains(&o.outpoint()))
-                .collect(),
-            None => self.unspent_coins().collect(),
-        };
-
-        let candidates: Vec<Candidate> = utxos
-            .iter()
-            .map(|o| Candidate {
-                value: o.data().amount.to_sat(),
-                weight: o.address().data().script_type.input_weight_wu(),
-                input_count: 1,
+    /// Build coin selection candidates from this wallet's unspent coins.
+    pub(crate) fn coin_candidates(&self) -> Vec<CoinCandidate> {
+        self.unspent_coins()
+            .map(|o| CoinCandidate {
+                outpoint: o.outpoint(),
+                amount_sats: o.data().amount.to_sat(),
+                weight_wu: o.address().data().script_type.input_weight_wu(),
                 is_segwit: o.address().data().script_type.is_segwit(),
             })
-            .collect();
+            .collect()
+    }
 
-        let mut coin_selector = CoinSelector::new(&candidates);
-        if select_all {
-            coin_selector.select_all();
-        }
-        let drain_weights = DrainWeights::default();
-
-        let dust_limit = TR_DUST_RELAY_MIN_VALUE;
-
-        let long_term_feerate = bdk_coin_select::FeeRate::from_sat_per_wu(
-            long_term_feerate.to_sat_per_kwu() as f32 * 1e-3,
-        );
-
-        let change_policy = ChangePolicy::min_value_and_waste(
-            drain_weights,
-            dust_limit,
-            target.fee.rate,
-            long_term_feerate,
-        );
-
-        let metric = LowestFee {
-            target,
-            long_term_feerate,
-            change_policy,
-        };
-
-        if let Err(err) = coin_selector.run_bnb(metric, 100_000) {
-            // TODO: should be a error log
-            warn!("BNB failed to find a solution: {}", err);
-
-            coin_selector.select_until_target_met(target).expect(
-                "coin selection should always succeed since payments consider budger lower bound",
-            );
-        };
-
-        let selection = coin_selector
-            .apply_selection(&utxos)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        let change = coin_selector.drain(target, change_policy);
-
-        (selection.into_iter(), change)
+    /// Build coin selection candidates for a specific set of outpoints.
+    pub(crate) fn coin_candidates_for(&self, outpoints: &[Outpoint]) -> Vec<CoinCandidate> {
+        outpoints
+            .iter()
+            .map(|op| {
+                let o = op.with(self.sim);
+                CoinCandidate {
+                    outpoint: *op,
+                    amount_sats: o.data().amount.to_sat(),
+                    weight_wu: o.address().data().script_type.input_weight_wu(),
+                    is_segwit: o.address().data().script_type.is_segwit(),
+                }
+            })
+            .collect()
     }
 
     fn potentially_spendable_txos(&self) -> impl Iterator<Item = OutputHandle<'a>> + '_ {
@@ -191,73 +143,6 @@ impl<'a> WalletHandleMut<'a> {
             script_type: self.data().script_type,
         });
         id
-    }
-
-    /// stateless utility function to construct a transaction for a given payment obligation
-    fn construct_transaction_template(
-        &mut self,
-        payment_obligation_ids: &[PaymentObligationId],
-        change_addr: &AddressId,
-        select_all: bool,
-        required_inputs: Option<&[Outpoint]>,
-    ) -> TxData {
-        let mut amount_and_destination = vec![];
-        for payment_obligation_id in payment_obligation_ids.iter() {
-            let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
-            let to_wallet = payment_obligation.to;
-            let to_address = to_wallet.with_mut(self.sim).new_address();
-            amount_and_destination.push((payment_obligation.amount, to_address));
-        }
-
-        let amount = amount_and_destination
-            .iter()
-            .map(|(amount, _)| amount.to_sat())
-            .sum();
-        let output_weight_sum: u32 = amount_and_destination
-            .iter()
-            .map(|(_, address_id)| {
-                address_id
-                    .with(self.sim)
-                    .data()
-                    .script_type
-                    .output_weight_wu()
-            })
-            .sum();
-        let target = Target {
-            fee: TargetFee {
-                rate: bdk_coin_select::FeeRate::from_sat_per_vb(1.0),
-                replace: None,
-            },
-            outputs: TargetOutputs {
-                value_sum: amount,
-                weight_sum: output_weight_sum,
-                n_outputs: amount_and_destination.len(),
-            },
-        };
-        let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).expect("valid fee rate");
-
-        let (selected_coins, drain) =
-            self.handle()
-                .select_coins(target, long_term_feerate, select_all, required_inputs);
-        let mut tx = TxData::default();
-        let mut outputs = vec![];
-        for (amount, address_id) in amount_and_destination.iter() {
-            outputs.push(Output {
-                amount: *amount,
-                address_id: *address_id,
-            });
-        }
-        outputs.push(Output {
-            amount: Amount::from_sat(drain.value),
-            address_id: *change_addr,
-        });
-        tx.inputs = selected_coins
-            .map(|o| Input {
-                outpoint: o.outpoint,
-            })
-            .collect();
-        tx.outputs = outputs;
-        tx
     }
 
     fn participate_in_multi_party_payjoin(&mut self, bulletin_board_id: &BulletinBoardId) {
@@ -457,12 +342,8 @@ impl<'a> WalletHandleMut<'a> {
     pub(crate) fn do_action(&'a mut self, action: &Action) {
         match action {
             Action::Wait => {}
-            // TODO: the next 3 actions can be folded into one spend action, param'd off # of po's and coin selection strategy. All of them are unilateral
-            Action::UnilateralPayments(po_ids, coin_selection_strategy) => {
-                self.handle_payment_obligations(
-                    po_ids,
-                    matches!(coin_selection_strategy, CoinSelectionStrategy::SpendAll),
-                );
+            Action::UnilateralPayments(po_ids, selected_inputs, change_amounts) => {
+                self.handle_payment_obligations(po_ids, selected_inputs, change_amounts);
             }
             Action::AcceptCospendProposal((message_id, bulletin_board_id)) => {
                 // Aggregator already pre-filled all inputs on the bulletin board.
@@ -540,27 +421,25 @@ impl<'a> WalletHandleMut<'a> {
                     .cospend_interests
                     .retain(|i| !interests.contains(i));
             }
-            Action::ContributeOutputsToSession(bulletin_board_id, po_ids) => {
-                let session_inputs = self
-                    .info()
-                    .active_multi_party_payjoins
-                    .get(bulletin_board_id)
-                    .unwrap()
-                    .inputs
-                    .clone();
-                let input_outpoints: Vec<Outpoint> =
-                    session_inputs.iter().map(|i| i.outpoint).collect();
-                let required = if input_outpoints.is_empty() {
-                    None
-                } else {
-                    Some(input_outpoints.as_slice())
-                };
-                let change_addr = self.new_address();
-                let full_template =
-                    self.construct_transaction_template(po_ids, &change_addr, false, required);
-                // Inputs are already pre-filled by the aggregator; broadcast our outputs directly.
+            Action::ContributeOutputsToSession(bulletin_board_id, po_ids, change_amounts) => {
                 use crate::bulletin_board::BroadcastMessageType;
-                for output in full_template.outputs.iter() {
+                let mut outputs = vec![];
+                for po_id in po_ids {
+                    let po = po_id.with(self.sim).data().clone();
+                    let to_addr = po.to.with_mut(self.sim).new_address();
+                    outputs.push(Output {
+                        amount: po.amount,
+                        address_id: to_addr,
+                    });
+                }
+                for &change_amount in change_amounts {
+                    let change_addr = self.new_address();
+                    outputs.push(Output {
+                        amount: change_amount,
+                        address_id: change_addr,
+                    });
+                }
+                for output in &outputs {
                     self.sim.add_message_to_bulletin_board(
                         *bulletin_board_id,
                         BroadcastMessageType::ContributeOutputs(*output),
@@ -607,16 +486,34 @@ impl<'a> WalletHandleMut<'a> {
     fn handle_payment_obligations(
         &'a mut self,
         payment_obligation_ids: &[PaymentObligationId],
-        select_all_utxos: bool,
+        selected_inputs: &[Outpoint],
+        change_amounts: &[Amount],
     ) {
-        let change_addr = self.new_address();
-        let tx_template = self.construct_transaction_template(
-            payment_obligation_ids,
-            &change_addr,
-            select_all_utxos,
-            None,
-        );
-        let tx_id = self.spend_tx(tx_template);
+        // Build recipient outputs.
+        let mut outputs = vec![];
+        for po_id in payment_obligation_ids.iter() {
+            let po = po_id.with(self.sim).data().clone();
+            let to_addr = po.to.with_mut(self.sim).new_address();
+            outputs.push(Output {
+                amount: po.amount,
+                address_id: to_addr,
+            });
+        }
+        // Add pre-computed change outputs.
+        for &change_amount in change_amounts.iter() {
+            let change_addr = self.new_address();
+            outputs.push(Output {
+                amount: change_amount,
+                address_id: change_addr,
+            });
+        }
+        let tx_id = self.spend_tx(TxData {
+            inputs: selected_inputs
+                .iter()
+                .map(|op| Input { outpoint: *op })
+                .collect(),
+            outputs,
+        });
         self.info_mut()
             .txid_to_payment_obligation_ids
             .insert(tx_id, payment_obligation_ids.to_vec());

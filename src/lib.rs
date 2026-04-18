@@ -39,6 +39,7 @@ mod macros;
 mod actions;
 mod blocks;
 mod bulletin_board;
+mod coin_selection;
 pub mod config;
 mod cospend;
 mod economic_graph;
@@ -61,16 +62,6 @@ impl PrngFactory {
         let seed = self.0.next_u64();
         Pcg64::seed_from_u64(seed)
     }
-}
-
-// all have RBF and non-RBF variants?
-#[derive(Debug)]
-#[allow(dead_code)]
-enum CoinSelectionStrategy {
-    Fifo,
-    SpendAll,
-    Bnb,
-    // TODO brute force pre-computed for cost function
 }
 
 // total fee budget
@@ -1087,33 +1078,29 @@ mod tests {
             },
         };
 
-        let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).unwrap();
+        let candidates = alice.with(&sim).coin_candidates();
+        let (selected_outpoints, change_amounts) =
+            crate::coin_selection::select_bnb(&candidates, target)
+                .unwrap_or_else(|| crate::coin_selection::select_all(&candidates, target));
 
         let spend = alice
             .with_mut(&mut sim)
-            .new_tx(|tx, sim| {
-                // TODO use select_coins
-                let (inputs, drain) =
-                    alice
-                        .with(sim)
-                        .select_coins(target, long_term_feerate, false, None);
-
-                tx.inputs = inputs
-                    .map(|o| Input {
-                        outpoint: o.outpoint,
-                    })
+            .new_tx(|tx, _sim| {
+                tx.inputs = selected_outpoints
+                    .iter()
+                    .map(|op| Input { outpoint: *op })
                     .collect();
 
-                tx.outputs = vec![
-                    Output {
-                        amount: payment.amount,
-                        address_id: bob_payment_addr,
-                    },
-                    Output {
-                        amount: Amount::from_sat(drain.value),
+                tx.outputs = vec![Output {
+                    amount: payment.amount,
+                    address_id: bob_payment_addr,
+                }];
+                for &change_amount in &change_amounts {
+                    tx.outputs.push(Output {
+                        amount: change_amount,
                         address_id: alice_change_addr,
-                    },
-                ];
+                    });
+                }
             })
             .id;
         sim.assert_invariants();
