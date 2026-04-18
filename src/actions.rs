@@ -508,21 +508,24 @@ impl Strategy for MultipartyStrategy {
             actions.push(Action::ContinueParticipateInCospend(*bulletin_board_id));
         }
 
-        // Accept incoming proposals if no active session and cost-competitive
+        // Accept incoming proposals if no active session, cost-competitive, and enough fallbacks
         if let Some((bulletin_board_id, message_id)) = cospend_proposals.first() {
             if active_cospends.is_empty() {
-                let best_unilateral_worst = enumerate_unilateral_actions(wallet)
-                    .iter()
-                    .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
-                    .min()
-                    .unwrap_or(ActionCost(f64::MAX));
-                let action = Action::AcceptCospendProposal((*message_id, *bulletin_board_id));
-                if scorer
-                    .bracket(&plan_from_action(&action, wallet), wallet)
-                    .worst
-                    <= best_unilateral_worst
-                {
-                    actions.push(action);
+                let unilateral_fallbacks = enumerate_unilateral_actions(wallet);
+                if unilateral_fallbacks.len() >= scorer.min_fallback_plans {
+                    let best_unilateral_worst = unilateral_fallbacks
+                        .iter()
+                        .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
+                        .min()
+                        .unwrap_or(ActionCost(f64::MAX));
+                    let action = Action::AcceptCospendProposal((*message_id, *bulletin_board_id));
+                    if scorer
+                        .bracket(&plan_from_action(&action, wallet), wallet)
+                        .worst
+                        <= best_unilateral_worst
+                    {
+                        actions.push(action);
+                    }
                 }
             }
         }
@@ -586,43 +589,49 @@ impl Strategy for MultipartyStrategy {
                 actions.push(Action::RegisterInput(common_inputs));
             }
 
-            // Propose cospend to each orderbook peer whose worst-case cost is competitive
+            // Propose cospend to each orderbook peer whose worst-case cost is competitive,
+            // provided there are enough unilateral fallback plans.
             if !payment_obligations.is_empty() {
                 if let Some(own_utxo) = wallet.spendable_utxos().into_iter().next() {
                     let po_ids: Vec<PaymentObligationId> =
                         payment_obligations.iter().map(|po| po.id).collect();
-                    let best_unilateral_worst = enumerate_unilateral_actions(wallet)
-                        .iter()
-                        .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
-                        .min()
-                        .unwrap_or(ActionCost(f64::MAX));
-                    let residue_pos: Vec<PaymentObligationData> = wallet
-                        .unhandled_payment_obligations()
-                        .into_iter()
-                        .filter(|po| !po_ids.contains(&po.id))
-                        .collect();
-                    let interests: Vec<CospendInterest> = wallet
-                        .orderbook_utxos()
-                        .into_iter()
-                        .filter(|peer_utxo| {
-                            let plan = Plan {
-                                my_inputs: vec![own_utxo.outpoint],
-                                my_outputs: vec![],
-                                their_inputs: vec![peer_utxo.outpoint],
-                                their_outputs: vec![],
-                                wallet_residue: WalletResidue {
-                                    utxos: wallet.spendable_utxos(),
-                                    payment_obligations: residue_pos.clone(),
-                                },
-                            };
-                            scorer.bracket(&plan, wallet).worst <= best_unilateral_worst
-                        })
-                        .map(|peer_utxo| CospendInterest {
-                            utxos: vec![own_utxo.clone(), peer_utxo],
-                        })
-                        .collect();
-                    if !interests.is_empty() {
-                        actions.push(Action::ProposeCospend(interests));
+                    let unilateral_fallbacks = enumerate_unilateral_actions(wallet);
+                    if unilateral_fallbacks.len() < scorer.min_fallback_plans {
+                        // Not enough fallback options — skip proposing
+                    } else {
+                        let best_unilateral_worst = unilateral_fallbacks
+                            .iter()
+                            .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
+                            .min()
+                            .unwrap_or(ActionCost(f64::MAX));
+                        let residue_pos: Vec<PaymentObligationData> = wallet
+                            .unhandled_payment_obligations()
+                            .into_iter()
+                            .filter(|po| !po_ids.contains(&po.id))
+                            .collect();
+                        let interests: Vec<CospendInterest> = wallet
+                            .orderbook_utxos()
+                            .into_iter()
+                            .filter(|peer_utxo| {
+                                let plan = Plan {
+                                    my_inputs: vec![own_utxo.outpoint],
+                                    my_outputs: vec![],
+                                    their_inputs: vec![peer_utxo.outpoint],
+                                    their_outputs: vec![],
+                                    wallet_residue: WalletResidue {
+                                        utxos: wallet.spendable_utxos(),
+                                        payment_obligations: residue_pos.clone(),
+                                    },
+                                };
+                                scorer.bracket(&plan, wallet).worst <= best_unilateral_worst
+                            })
+                            .map(|peer_utxo| CospendInterest {
+                                utxos: vec![own_utxo.clone(), peer_utxo],
+                            })
+                            .collect();
+                        if !interests.is_empty() {
+                            actions.push(Action::ProposeCospend(interests));
+                        }
                     }
                 }
             }
@@ -692,6 +701,9 @@ pub(crate) struct CompositeScorer {
     pub(crate) payment_obligation_weight: f64,
     /// Weight applied to multi-party coordination value
     pub(crate) coordination_weight: f64,
+    /// Minimum number of viable unilateral fallback plans required before committing to a
+    /// multiparty session. 0 = no restriction.
+    pub(crate) min_fallback_plans: usize,
 }
 
 impl CompositeScorer {
@@ -799,6 +811,7 @@ mod tests {
                     privacy_weight: 0.0,
                     payment_obligation_weight: 0.0,
                     coordination_weight: 0.0,
+                    min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2tr,
             }],

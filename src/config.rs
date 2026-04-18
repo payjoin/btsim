@@ -36,6 +36,10 @@ pub struct ScorerConfig {
     pub payment_obligation_weight: f64,
     /// Weight applied to multi-party coordination value
     pub coordination_weight: f64,
+    /// Minimum number of viable unilateral fallback plans required before committing to a
+    /// multiparty session. 0 = no restriction (default).
+    #[serde(default)]
+    pub min_fallback_plans: usize,
 }
 
 impl Config {

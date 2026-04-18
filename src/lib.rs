@@ -250,6 +250,7 @@ impl SimulationBuilder {
                 privacy_weight: wallet_type.scorer.privacy_weight,
                 payment_obligation_weight: wallet_type.scorer.payment_obligation_weight,
                 coordination_weight: wallet_type.scorer.coordination_weight,
+                min_fallback_plans: wallet_type.scorer.min_fallback_plans,
             };
 
             for _ in 0..wallet_type.count {
@@ -946,6 +947,7 @@ mod tests {
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
                 coordination_weight: 0.0,
+                min_fallback_plans: 0,
             },
             script_type: ScriptType::P2tr,
         }];
@@ -988,6 +990,7 @@ mod tests {
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
                 coordination_weight: 0.0,
+                min_fallback_plans: 0,
             },
             script_type: ScriptType::P2tr,
         }];
@@ -1000,6 +1003,7 @@ mod tests {
             privacy_weight: 2.0,
             payment_obligation_weight: 1.0,
             coordination_weight: 0.0,
+            min_fallback_plans: 0,
         };
         let alice_strategies = vec![
             create_strategy("UnilateralSpender").unwrap(),
@@ -1197,6 +1201,7 @@ mod tests {
                     privacy_weight: 2.0,
                     payment_obligation_weight: 1.0,
                     coordination_weight: 0.0,
+                    min_fallback_plans: 0,
                 },
                 script_type,
             }];
@@ -1256,6 +1261,7 @@ mod tests {
                     privacy_weight: 0.0,
                     payment_obligation_weight: 1.0,
                     coordination_weight: 0.0,
+                    min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2tr,
             },
@@ -1268,6 +1274,7 @@ mod tests {
                     privacy_weight: 0.0,
                     payment_obligation_weight: 1.0,
                     coordination_weight: 0.0,
+                    min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2tr,
             },
