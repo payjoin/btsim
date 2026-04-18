@@ -256,7 +256,17 @@ fn plan_from_action(action: &Action, wallet: &WalletHandle) -> Plan {
                 },
             }
         }
-        _ => unreachable!("unhandled action"),
+        // Actions with no direct PO handling or tx contribution: residue = entire wallet state.
+        _ => Plan {
+            my_inputs: vec![],
+            my_outputs: vec![],
+            their_inputs: vec![],
+            their_outputs: vec![],
+            wallet_residue: WalletResidue {
+                utxos: wallet.spendable_utxos(),
+                payment_obligations: all_pos,
+            },
+        },
     }
 }
 
@@ -349,6 +359,43 @@ fn change_for_session_contribution(
         let candidates = wallet.coin_candidates_for(&session_input_outpoints);
         select_all(&candidates, target).1
     }
+}
+
+/// Enumerate every `Action::UnilateralPayments` that a wallet could perform unilaterally,
+/// covering the full powerset of pending payment obligations and both BNB and SpendAll
+/// coin selection strategies for each subset.
+///
+/// This is used to establish the true best unilateral fallback cost when deciding whether
+/// to accept or propose a cospend. Considering only per-obligation actions (as
+/// `UnilateralSpender` does) understates the fallback because batching can be cheaper.
+///
+/// The powerset has 2^n - 1 non-empty subsets. This is feasible for small n (typical in
+/// simulation where a wallet holds a handful of pending POs at a time).
+fn enumerate_unilateral_actions(wallet: &WalletHandle) -> Vec<Action> {
+    let all_pos = wallet.unhandled_payment_obligations();
+    let n = all_pos.len();
+    if n == 0 {
+        return vec![];
+    }
+    let candidates = wallet.coin_candidates();
+    let mut actions = vec![];
+    for mask in 1u64..(1u64 << n) {
+        let subset: Vec<&PaymentObligationData> = (0..n)
+            .filter(|i| mask & (1 << i) != 0)
+            .map(|i| &all_pos[i])
+            .collect();
+        let po_ids: Vec<PaymentObligationId> = subset.iter().map(|po| po.id).collect();
+        let subset_owned: Vec<PaymentObligationData> = subset.into_iter().cloned().collect();
+        let target = target_for_obligations(&subset_owned, wallet);
+        if let Some((inputs, change)) = select_bnb(&candidates, target) {
+            actions.push(Action::UnilateralPayments(po_ids.clone(), inputs, change));
+        }
+        let (all_inputs, change) = select_all(&candidates, target);
+        if !all_inputs.is_empty() {
+            actions.push(Action::UnilateralPayments(po_ids, all_inputs, change));
+        }
+    }
+    actions
 }
 
 #[derive(Debug, Clone)]
@@ -465,10 +512,8 @@ impl Strategy for MakerStrategy {
             if active_cospends.is_empty() {
                 let scorer = wallet.data().scorer.clone();
 
-                let best_unilateral_worst = UnilateralSpender
-                    .enumerate_candidate_actions(wallet)
+                let best_unilateral_worst = enumerate_unilateral_actions(wallet)
                     .iter()
-                    .filter(|a| matches!(a, Action::UnilateralPayments(..)))
                     .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
                     .min()
                     .unwrap_or(ActionCost(f64::MAX));
@@ -487,10 +532,8 @@ impl Strategy for MakerStrategy {
         // Contribute outputs to sessions that are waiting for them (AcceptedProposal state),
         // gated on the same cost comparison used at accept time.
         let scorer = wallet.data().scorer.clone();
-        let best_unilateral_worst_for_contribution = UnilateralSpender
-            .enumerate_candidate_actions(wallet)
+        let best_unilateral_worst_for_contribution = enumerate_unilateral_actions(wallet)
             .iter()
-            .filter(|a| matches!(a, Action::UnilateralPayments(..)))
             .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
             .min()
             .unwrap_or(ActionCost(f64::MAX));
@@ -571,10 +614,8 @@ impl Strategy for TakerStrategy {
         // Contribute outputs to sessions awaiting them (AcceptedProposal state),
         // gated on the same cost comparison used at accept time.
         let scorer = wallet.data().scorer.clone();
-        let best_unilateral_worst_for_contribution = UnilateralSpender
-            .enumerate_candidate_actions(wallet)
+        let best_unilateral_worst_for_contribution = enumerate_unilateral_actions(wallet)
             .iter()
-            .filter(|a| matches!(a, Action::UnilateralPayments(..)))
             .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
             .min()
             .unwrap_or(ActionCost(f64::MAX));
@@ -626,10 +667,8 @@ impl Strategy for TakerStrategy {
         let scorer = wallet.data().scorer.clone();
         let po_ids: Vec<PaymentObligationId> = payment_obligations.iter().map(|po| po.id).collect();
 
-        let best_unilateral_worst = UnilateralSpender
-            .enumerate_candidate_actions(wallet)
+        let best_unilateral_worst = enumerate_unilateral_actions(wallet)
             .iter()
-            .filter(|a| matches!(a, Action::UnilateralPayments(..)))
             .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
             .min()
             .unwrap_or(ActionCost(f64::MAX));
