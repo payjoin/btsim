@@ -48,8 +48,7 @@ impl Config {
             "UnilateralSpender",
             "Consolidator",
             "BatchSpender",
-            "TakerStrategy",
-            "MakerStrategy",
+            "MultipartyStrategy",
             "AggregatorStrategy",
         ];
         for wallet_type in &config.wallet_types {
