@@ -7,12 +7,11 @@ use log::debug;
 use crate::{
     bulletin_board::BulletinBoardId,
     coin_selection::{select_all, select_bnb},
-    cospend::CospendInterest,
+    cospend::{CospendInterest, UtxoWithMetadata},
     message::MessageId,
     transaction::Outpoint,
     tx_contruction::TxConstructionState,
-    wallet::{PaymentObligationData, PaymentObligationId, WalletHandle},
-    Simulation, TimeStep,
+    wallet::{AddressId, PaymentObligationData, PaymentObligationId, WalletHandle},
 };
 
 fn piecewise_linear(x: f64, points: &[(f64, f64)]) -> f64 {
@@ -63,135 +62,201 @@ pub(crate) enum Action {
     Wait,
 }
 
-/// Predicted diff of wallet state resulting from taking an action.
-/// Each field corresponds to one category of state change.
-#[derive(Debug, Default)]
-#[allow(dead_code)]
-pub(crate) struct PredictedOutcome {
-    /// Payment obligations fulfilled by this action
-    pub(crate) payment_obligations_handled: Vec<PaymentObligationId>,
-    /// Payment obligations missed/abandoned
-    pub(crate) payment_obligations_abandoned: Vec<PaymentObligationId>,
-    /// UTXOs consumed as inputs
-    pub(crate) utxos_spent: Vec<Outpoint>,
-    /// Outpoints of outputs created. TODO: and what feerate interval they were created in?
-    pub(crate) outputs_created: Vec<Outpoint>,
-    /// UTXOs newly published on the order book
-    pub(crate) order_book_registrations: Vec<Outpoint>,
-    /// New multi-party cospend sessions added for this wallet
-    pub(crate) cospend_proposals_accepted: Vec<BulletinBoardId>,
-    /// Session state machine transitions
-    pub(crate) session_state_updates: Vec<(BulletinBoardId, TxConstructionState)>,
+/// The portion of wallet state not consumed by a given plan.
+#[derive(Debug, Clone)]
+pub(crate) struct WalletResidue {
+    /// UTXOs not spent by a plan
+    #[allow(dead_code)]
+    pub(crate) utxos: Vec<UtxoWithMetadata>,
+    /// Payment obligations not handled by a plan
+    pub(crate) payment_obligations: Vec<PaymentObligationData>,
 }
 
-impl PredictedOutcome {
-    pub(crate) fn cost(
-        &self,
-        scorer: &CompositeScorer,
-        sim: &Simulation,
-        current_timestep: TimeStep,
-    ) -> ActionCost {
-        let mut cost = ActionCost(INHERENT_ACTION_COST);
-        for po_id in &self.payment_obligations_handled {
-            let po = po_id.with(sim).data();
-            let time_left = po.deadline.0 as i32 - current_timestep.0 as i32;
-            // Utility of 2*weight at deadline easily
-            // exceeds the base cost, making near-deadline payments cheaper than waiting.
-            let base_cost = po.amount.to_float_in(bitcoin::Denomination::Bitcoin);
-            let points = [
-                (0.0, 2.0 * scorer.payment_obligation_weight),
-                (2.0, scorer.payment_obligation_weight),
-                (5.0, 0.0),
-            ];
-            let utility = piecewise_linear(time_left as f64, &points);
-            debug!(
-                "PaymentObligationHandled cost: base={} utility={}",
-                base_cost, utility
-            );
-            cost = cost + ActionCost(base_cost - utility);
-        }
-        // TODO: cost from payment_obligations_abandoned (missed deadline penalty)
-        // TODO: cost from utxos_spent (UTXO fragmentation / privacy loss)
-        // TODO: cost from outputs_created (fee rate efficiency)
-        // TODO: cost from order_book_registrations (coordination value)
-        // TODO: cost from cospend_proposals_accepted / session_state_updates (privacy gain)
-        cost
-    }
+/// Transaction-level view of a candidate action from this wallet's perspective.
+#[derive(Debug, Clone)]
+pub(crate) struct Plan {
+    #[allow(dead_code)]
+    pub(crate) my_inputs: Vec<Outpoint>,
+    #[allow(dead_code)]
+    pub(crate) my_outputs: Vec<Amount>,
+    #[allow(dead_code)]
+    pub(crate) their_inputs: Vec<Outpoint>,
+    #[allow(dead_code)]
+    pub(crate) their_outputs: Vec<Amount>,
+    /// Unspent UTXOs and unhandled POs after this plan executes
+    pub(crate) wallet_residue: WalletResidue,
 }
 
-fn simulate_one_action(wallet_handle: &WalletHandle, action: &Action) -> PredictedOutcome {
-    let old_info = wallet_handle.info().clone();
+/// Scaling factors controlling which privacy penalties are active when scoring a plan.
+///
+/// Privacy costs decompose into two orthogonal categories:
+/// - External: risks from counterparty behavior - what they can infer, leak, or do
+///   with the information they receive by participating (e.g. they see my input UTXOs,
+///   they can correlate outputs, they may be chain-analysis firms).
+/// - Internal: costs from my own transaction structure choices - change linkability,
+///   UTXO fragmentation, address reuse. These are always in my control regardless of
+///   who the counterparty is.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CostMode {
+    /// Multiplier for privacy costs caused by counterparty behavior.
+    /// 0.0 = trust counterparties fully; 1.0 = assume adversarial.
+    pub(crate) external: f64,
+    /// Multiplier for privacy costs from this wallet's own tx structure choices. i.e my own inputs and outputs
+    #[allow(dead_code)]
+    pub(crate) internal: f64,
+}
 
-    let wallet_id = wallet_handle.data().id;
-    let mut sim = wallet_handle.sim.clone();
-    wallet_id.with_mut(&mut sim).do_action(action);
-    let new_info = wallet_id.with(&sim).info().clone();
-
-    // POs handled: derived from action since confirmation is deferred to block
-    let payment_obligations_handled: Vec<PaymentObligationId> = match action {
-        Action::UnilateralPayments(po_ids, _, _) => po_ids.clone(),
-        Action::ContributeOutputsToSession(_, po_ids, _) => po_ids.clone(),
-        _ => vec![],
+impl CostMode {
+    /// Counterparties are assumed honest: external penalty zeroed, internal penalties retained.
+    pub(crate) const EXTERNAL_PENALTIES_OFF: Self = Self {
+        external: 0.0,
+        internal: 1.0,
     };
+    /// Counterparties are assumed adversarial: full external penalty applied.
+    pub(crate) const EXTERNAL_PENALTIES_ON: Self = Self {
+        external: 1.0,
+        internal: 1.0,
+    };
+}
 
-    // UTXOs spent: new entries in unconfirmed_spends
-    let utxos_spent: Vec<Outpoint> = new_info
-        .unconfirmed_spends
-        .iter()
-        .filter(|op| !old_info.unconfirmed_spends.contains(op))
-        .copied()
-        .collect();
+/// Cost interval for a plan. Best and worse case senarios are based on the cost mode.
+#[derive(Debug, Clone)]
+pub(crate) struct CostBracket {
+    pub(crate) worst: ActionCost,
+    #[allow(dead_code)]
+    pub(crate) best: ActionCost,
+}
 
-    // Outputs created: new entries in unconfirmed_txos
-    let outputs_created: Vec<Outpoint> = new_info
-        .unconfirmed_txos
-        .iter()
-        .filter(|op| !old_info.unconfirmed_txos.contains(op))
-        .copied()
-        .collect();
+/// Build a `Plan` from any `Action`, deriving inputs, outputs, and wallet residue
+/// from the action's payload and current wallet state.
+/// For actions with no direct cost impact (Wait, RegisterInput, etc.) no POs are handled
+/// and the full wallet state is the residue.
+fn plan_from_action(action: &Action, wallet: &WalletHandle) -> Plan {
+    use crate::bulletin_board::BroadcastMessageType;
+    let all_pos = wallet.unhandled_payment_obligations();
 
-    // Order book registrations: new entries in registered_inputs
-    let order_book_registrations: Vec<Outpoint> = new_info
-        .registered_inputs
-        .iter()
-        .filter(|op| !old_info.registered_inputs.contains(op))
-        .copied()
-        .collect();
+    match action {
+        Action::UnilateralPayments(po_ids, inputs, change) => {
+            let handled: std::collections::HashSet<_> = po_ids.iter().cloned().collect();
+            Plan {
+                my_inputs: inputs.clone(),
+                my_outputs: change.clone(),
+                their_inputs: vec![],
+                their_outputs: all_pos
+                    .iter()
+                    .filter(|po| handled.contains(&po.id))
+                    .map(|po| po.amount)
+                    .collect(),
+                wallet_residue: WalletResidue {
+                    utxos: wallet.spendable_utxos(),
+                    payment_obligations: all_pos
+                        .into_iter()
+                        .filter(|po| !handled.contains(&po.id))
+                        .collect(),
+                },
+            }
+        }
 
-    // Cospend proposals accepted: new sessions where this wallet is a maker
-    let cospend_proposals_accepted: Vec<BulletinBoardId> = new_info
-        .active_multi_party_payjoins
-        .iter()
-        .filter(|(bb, _session)| !old_info.active_multi_party_payjoins.contains_key(bb))
-        .map(|(bb, _)| *bb)
-        .collect();
-
-    // Session state transitions: boards present in both old and new with a different state
-    let session_state_updates: Vec<(BulletinBoardId, TxConstructionState)> = new_info
-        .active_multi_party_payjoins
-        .iter()
-        .filter_map(|(bb, new_session)| {
-            old_info
+        Action::ContributeOutputsToSession(bb_id, po_ids, change) => {
+            let session = wallet
+                .info()
                 .active_multi_party_payjoins
-                .get(bb)
-                .and_then(|old_session| {
-                    if old_session.state != new_session.state {
-                        Some((*bb, new_session.state.clone()))
-                    } else {
-                        None
-                    }
-                })
-        })
-        .collect();
+                .get(bb_id)
+                .expect("session must exist when contributing outputs");
+            let my_inputs: Vec<Outpoint> = session.inputs.iter().map(|i| i.outpoint).collect();
+            let messages = wallet.sim.bulletin_boards[bb_id.0].messages.clone();
+            let handled: std::collections::HashSet<_> = po_ids.iter().cloned().collect();
+            Plan {
+                their_inputs: messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        BroadcastMessageType::ContributeInputs(op) if !my_inputs.contains(op) => {
+                            Some(*op)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                my_inputs,
+                my_outputs: change.clone(),
+                their_outputs: all_pos
+                    .iter()
+                    .filter(|po| handled.contains(&po.id))
+                    .map(|po| po.amount)
+                    .collect(),
+                wallet_residue: WalletResidue {
+                    utxos: wallet.spendable_utxos(),
+                    payment_obligations: all_pos
+                        .into_iter()
+                        .filter(|po| !handled.contains(&po.id))
+                        .collect(),
+                },
+            }
+        }
 
-    PredictedOutcome {
-        payment_obligations_handled,
-        payment_obligations_abandoned: vec![],
-        utxos_spent,
-        outputs_created,
-        order_book_registrations,
-        cospend_proposals_accepted,
-        session_state_updates,
+        Action::AcceptCospendProposal((_, bb_id)) => {
+            let messages = wallet.sim.bulletin_boards[bb_id.0].messages.clone();
+            let my_confirmed = &wallet.info().confirmed_utxos;
+            let my_addresses: std::collections::HashSet<AddressId> =
+                wallet.data().addresses.iter().cloned().collect();
+            let handled: std::collections::HashSet<PaymentObligationId> = wallet
+                .info()
+                .active_multi_party_payjoins
+                .get(bb_id)
+                .map(|s| s.payment_obligation_ids.iter().cloned().collect())
+                .unwrap_or_default();
+            Plan {
+                my_inputs: messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        BroadcastMessageType::ContributeInputs(op) if my_confirmed.contains(op) => {
+                            Some(*op)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                my_outputs: messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        BroadcastMessageType::ContributeOutputs(o)
+                            if my_addresses.contains(&o.address_id) =>
+                        {
+                            Some(o.amount)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                their_inputs: messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        BroadcastMessageType::ContributeInputs(op)
+                            if !my_confirmed.contains(op) =>
+                        {
+                            Some(*op)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                their_outputs: messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        BroadcastMessageType::ContributeOutputs(o)
+                            if !my_addresses.contains(&o.address_id) =>
+                        {
+                            Some(o.amount)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                wallet_residue: WalletResidue {
+                    utxos: wallet.spendable_utxos(),
+                    payment_obligations: all_pos
+                        .into_iter()
+                        .filter(|po| !handled.contains(&po.id))
+                        .collect(),
+                },
+            }
+        }
+        _ => unreachable!("unhandled action"),
     }
 }
 
@@ -202,7 +267,7 @@ pub(crate) trait Strategy: std::fmt::Debug {
     fn clone_box(&self) -> Box<dyn Strategy>;
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 // TODO: this should just be bitcoin::Amount
 pub(crate) struct ActionCost(f64);
 
@@ -395,27 +460,53 @@ impl Strategy for MakerStrategy {
             actions.push(Action::ContinueParticipateInCospend(*bulletin_board_id));
         }
 
-        // Accept new invitations. TODO: in the future makers will be have certain preferences for which invitations to accept.
+        // Accept new invitations if the worst-case cost is no worse than the best unilateral fallback.
         if let Some((bulletin_board_id, message_id)) = cospend_proposals.first() {
             if active_cospends.is_empty() {
-                actions.push(Action::AcceptCospendProposal((
-                    *message_id,
-                    *bulletin_board_id,
-                )));
+                let scorer = wallet.data().scorer.clone();
+
+                let best_unilateral_worst = UnilateralSpender
+                    .enumerate_candidate_actions(wallet)
+                    .iter()
+                    .filter(|a| matches!(a, Action::UnilateralPayments(..)))
+                    .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
+                    .min()
+                    .unwrap_or(ActionCost(f64::MAX));
+
+                let action = Action::AcceptCospendProposal((*message_id, *bulletin_board_id));
+                if scorer
+                    .bracket(&plan_from_action(&action, wallet), wallet)
+                    .worst
+                    <= best_unilateral_worst
+                {
+                    actions.push(action);
+                }
             }
         }
 
-        // Contribute outputs to sessions that are waiting for them (AcceptedProposal state)
+        // Contribute outputs to sessions that are waiting for them (AcceptedProposal state),
+        // gated on the same cost comparison used at accept time.
+        let scorer = wallet.data().scorer.clone();
+        let best_unilateral_worst_for_contribution = UnilateralSpender
+            .enumerate_candidate_actions(wallet)
+            .iter()
+            .filter(|a| matches!(a, Action::UnilateralPayments(..)))
+            .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
+            .min()
+            .unwrap_or(ActionCost(f64::MAX));
         for (bb_id, session) in wallet.info().active_multi_party_payjoins.iter() {
             if session.state == TxConstructionState::AcceptedProposal {
                 for po in payment_obligations.iter() {
                     let change =
                         change_for_session_contribution(bb_id, std::slice::from_ref(po), wallet);
-                    actions.push(Action::ContributeOutputsToSession(
-                        *bb_id,
-                        vec![po.id],
-                        change,
-                    ));
+                    let action = Action::ContributeOutputsToSession(*bb_id, vec![po.id], change);
+                    if scorer
+                        .bracket(&plan_from_action(&action, wallet), wallet)
+                        .worst
+                        <= best_unilateral_worst_for_contribution
+                    {
+                        actions.push(action);
+                    }
                 }
             }
         }
@@ -477,17 +568,29 @@ impl Strategy for TakerStrategy {
         let cospend_proposals = wallet.pending_cospend_proposals();
         let payment_obligations = wallet.unhandled_payment_obligations();
 
-        // Contribute outputs to sessions awaiting them (AcceptedProposal state)
+        // Contribute outputs to sessions awaiting them (AcceptedProposal state),
+        // gated on the same cost comparison used at accept time.
+        let scorer = wallet.data().scorer.clone();
+        let best_unilateral_worst_for_contribution = UnilateralSpender
+            .enumerate_candidate_actions(wallet)
+            .iter()
+            .filter(|a| matches!(a, Action::UnilateralPayments(..)))
+            .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
+            .min()
+            .unwrap_or(ActionCost(f64::MAX));
         for (bb_id, session) in wallet.info().active_multi_party_payjoins.iter() {
             if session.state == TxConstructionState::AcceptedProposal {
                 for po in payment_obligations.iter() {
                     let change =
                         change_for_session_contribution(bb_id, std::slice::from_ref(po), wallet);
-                    actions.push(Action::ContributeOutputsToSession(
-                        *bb_id,
-                        vec![po.id],
-                        change,
-                    ));
+                    let action = Action::ContributeOutputsToSession(*bb_id, vec![po.id], change);
+                    if scorer
+                        .bracket(&plan_from_action(&action, wallet), wallet)
+                        .worst
+                        <= best_unilateral_worst_for_contribution
+                    {
+                        actions.push(action);
+                    }
                 }
             }
         }
@@ -514,13 +617,45 @@ impl Strategy for TakerStrategy {
         }
 
         // Propose to each orderbook UTXO (non-committal): one interest per peer coin.
+        // Only propose to peers whose worst-case cost is no worse than the best unilateral fallback.
         let own_utxo = match wallet.spendable_utxos().into_iter().next() {
             Some(u) => u,
             None => return vec![Action::Wait],
         };
+
+        let scorer = wallet.data().scorer.clone();
+        let po_ids: Vec<PaymentObligationId> = payment_obligations.iter().map(|po| po.id).collect();
+
+        let best_unilateral_worst = UnilateralSpender
+            .enumerate_candidate_actions(wallet)
+            .iter()
+            .filter(|a| matches!(a, Action::UnilateralPayments(..)))
+            .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
+            .min()
+            .unwrap_or(ActionCost(f64::MAX));
+
+        let residue_pos: Vec<PaymentObligationData> = wallet
+            .unhandled_payment_obligations()
+            .into_iter()
+            .filter(|po| !po_ids.contains(&po.id))
+            .collect();
+
         let interests: Vec<CospendInterest> = wallet
             .orderbook_utxos()
             .into_iter()
+            .filter(|peer_utxo| {
+                let plan = Plan {
+                    my_inputs: vec![own_utxo.outpoint],
+                    my_outputs: vec![],
+                    their_inputs: vec![peer_utxo.outpoint],
+                    their_outputs: vec![],
+                    wallet_residue: WalletResidue {
+                        utxos: wallet.spendable_utxos(),
+                        payment_obligations: residue_pos.clone(),
+                    },
+                };
+                scorer.bracket(&plan, wallet).worst <= best_unilateral_worst
+            })
             .map(|peer_utxo| CospendInterest {
                 utxos: vec![own_utxo.clone(), peer_utxo],
             })
@@ -593,10 +728,66 @@ pub(crate) struct CompositeScorer {
 }
 
 impl CompositeScorer {
-    pub(crate) fn action_cost(&self, action: &Action, wallet_handle: &WalletHandle) -> ActionCost {
-        let current_timestep = wallet_handle.sim.current_timestep;
-        let outcome = simulate_one_action(wallet_handle, action);
-        outcome.cost(self, wallet_handle.sim, current_timestep)
+    /// Score a plan under a given cost mode.
+    /// Handled POs are derived by diffing wallet state against the plan's residue.
+    pub(crate) fn score(&self, plan: &Plan, wallet: &WalletHandle, mode: CostMode) -> ActionCost {
+        let ts = wallet.sim.current_timestep;
+
+        let residue_po_ids: std::collections::HashSet<PaymentObligationId> = plan
+            .wallet_residue
+            .payment_obligations
+            .iter()
+            .map(|po| po.id)
+            .collect();
+
+        let mut cost = ActionCost(INHERENT_ACTION_COST);
+        for po in wallet
+            .unhandled_payment_obligations()
+            .into_iter()
+            .filter(|po| !residue_po_ids.contains(&po.id))
+        {
+            let time_left = po.deadline.0 as i32 - ts.0 as i32;
+            // Utility of 2*weight at deadline easily exceeds the base cost,
+            // making near-deadline payments cheaper than waiting.
+            let base_cost = po.amount.to_float_in(bitcoin::Denomination::Bitcoin);
+            let points = [
+                (0.0, 2.0 * self.payment_obligation_weight),
+                (2.0, self.payment_obligation_weight),
+                (5.0, 0.0),
+            ];
+            let utility = piecewise_linear(time_left as f64, &points);
+            debug!(
+                "PaymentObligationHandled cost: base={} utility={}",
+                base_cost, utility
+            );
+            cost = cost + ActionCost(base_cost - utility);
+        }
+
+        // External privacy penalty: counterparty exposure from contributed UTXOs/outputs.
+        // The 0.5 coefficient is a per-peer exposure stub; will be replaced with a
+        // data-driven estimate once we track input/output graph linkability.
+        cost = cost + ActionCost(self.privacy_weight * mode.external * 0.5);
+        // TODO: internal privacy penalty (change linkability, UTXO fragmentation, address reuse)
+        // cost = cost + ActionCost(self.privacy_weight * mode.internal * internal_delta);
+
+        cost
+    }
+
+    /// Convenience wrapper: score the action under EXTERNAL_PENALTIES_ON.
+    pub(crate) fn action_cost(&self, action: &Action, wallet: &WalletHandle) -> ActionCost {
+        self.score(
+            &plan_from_action(action, wallet),
+            wallet,
+            CostMode::EXTERNAL_PENALTIES_ON,
+        )
+    }
+
+    /// Compute a `[best, worst]` cost bracket for a plan.
+    pub(crate) fn bracket(&self, plan: &Plan, wallet: &WalletHandle) -> CostBracket {
+        CostBracket {
+            worst: self.score(plan, wallet, CostMode::EXTERNAL_PENALTIES_ON),
+            best: self.score(plan, wallet, CostMode::EXTERNAL_PENALTIES_OFF),
+        }
     }
 }
 
