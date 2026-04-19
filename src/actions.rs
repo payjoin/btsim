@@ -508,48 +508,32 @@ impl Strategy for MultipartyStrategy {
             actions.push(Action::ContinueParticipateInCospend(*bulletin_board_id));
         }
 
-        // Accept incoming proposals if no active session, cost-competitive, and enough fallbacks
+        // Accept incoming proposals if no active session and enough unilateral fallbacks exist.
+        // No cost comparison here — acceptance is cheap (no funds committed yet) and the real
+        // cost gate is in ContributeOutputsToSession where POs are actually committed.
         if let Some((bulletin_board_id, message_id)) = cospend_proposals.first() {
             if active_cospends.is_empty() {
-                let unilateral_fallbacks = enumerate_unilateral_actions(wallet);
-                if unilateral_fallbacks.len() >= scorer.min_fallback_plans {
-                    let best_unilateral_worst = unilateral_fallbacks
-                        .iter()
-                        .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
-                        .min()
-                        .unwrap_or(ActionCost(f64::MAX));
-                    let action = Action::AcceptCospendProposal((*message_id, *bulletin_board_id));
-                    if scorer
-                        .bracket(&plan_from_action(&action, wallet), wallet)
-                        .worst
-                        <= best_unilateral_worst
-                    {
-                        actions.push(action);
-                    }
+                let fallback_count = enumerate_unilateral_actions(wallet).len();
+                if fallback_count >= scorer.min_fallback_plans {
+                    actions.push(Action::AcceptCospendProposal((
+                        *message_id,
+                        *bulletin_board_id,
+                    )));
                 }
             }
         }
 
-        // Contribute outputs to sessions in AcceptedProposal state, cost-gated
-        let best_unilateral_worst_for_contribution = enumerate_unilateral_actions(wallet)
-            .iter()
-            .map(|a| scorer.bracket(&plan_from_action(a, wallet), wallet).worst)
-            .min()
-            .unwrap_or(ActionCost(f64::MAX));
+        // Contribute outputs to sessions in AcceptedProposal state.
+        // No cost gate here: acceptance is the commitment decision; once accepted, the
+        // wallet fulfills by contributing all its pending POs to the session.
         for (bb_id, session) in wallet.info().active_multi_party_payjoins.iter() {
-            if session.state == TxConstructionState::AcceptedProposal {
-                for po in payment_obligations.iter() {
-                    let change =
-                        change_for_session_contribution(bb_id, std::slice::from_ref(po), wallet);
-                    let action = Action::ContributeOutputsToSession(*bb_id, vec![po.id], change);
-                    if scorer
-                        .bracket(&plan_from_action(&action, wallet), wallet)
-                        .worst
-                        <= best_unilateral_worst_for_contribution
-                    {
-                        actions.push(action);
-                    }
-                }
+            if session.state == TxConstructionState::AcceptedProposal
+                && !payment_obligations.is_empty()
+            {
+                let po_ids: Vec<PaymentObligationId> =
+                    payment_obligations.iter().map(|po| po.id).collect();
+                let change = change_for_session_contribution(bb_id, &payment_obligations, wallet);
+                actions.push(Action::ContributeOutputsToSession(*bb_id, po_ids, change));
             }
         }
 
@@ -612,6 +596,7 @@ impl Strategy for MultipartyStrategy {
                         let interests: Vec<CospendInterest> = wallet
                             .orderbook_utxos()
                             .into_iter()
+                            .filter(|peer_utxo| peer_utxo.owner != wallet.id)
                             .filter(|peer_utxo| {
                                 let plan = Plan {
                                     my_inputs: vec![own_utxo.outpoint],
@@ -744,10 +729,15 @@ impl CompositeScorer {
             cost = cost + ActionCost(base_cost - utility);
         }
 
-        // External privacy penalty: counterparty exposure from contributed UTXOs/outputs.
-        // The 0.5 coefficient is a per-peer exposure stub; will be replaced with a
-        // data-driven estimate once we track input/output graph linkability.
-        cost = cost + ActionCost(self.privacy_weight * mode.external * 0.5);
+        // TODO: replace 0.5 / 1.0 with data-driven coefficients from input/output graph analysis.
+        let privacy_cost = if plan.their_inputs.is_empty() {
+            // Unilateral
+            self.privacy_weight
+        } else {
+            // Cospend: on-chain ambiguity provides privacy; counterparty risk scales with mode.
+            self.privacy_weight * mode.external * 0.5
+        };
+        cost = cost + ActionCost(privacy_cost);
         // TODO: internal privacy penalty (change linkability, UTXO fragmentation, address reuse)
         // cost = cost + ActionCost(self.privacy_weight * mode.internal * internal_delta);
 
