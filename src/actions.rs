@@ -597,7 +597,7 @@ impl Strategy for MultipartyStrategy {
                         payment_obligations.iter().map(|po| po.id).collect();
                     let unilateral_fallbacks = enumerate_unilateral_actions(wallet);
                     if unilateral_fallbacks.len() < scorer.min_fallback_plans {
-                        // Not enough fallback options — skip proposing
+                        // Not enough fallback options. Don't propose anything dont make any commitments.
                     } else {
                         let best_unilateral_worst = unilateral_fallbacks
                             .iter()
@@ -648,13 +648,15 @@ impl Strategy for MultipartyStrategy {
     }
 }
 
+const MIN_AGGREGATE_INTERESTS: usize = 2;
+
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatorStrategy;
 
 impl Strategy for AggregatorStrategy {
     fn enumerate_candidate_actions(&self, wallet: &WalletHandle) -> Vec<Action> {
         let pending_interests = wallet.pending_interests();
-        if pending_interests.is_empty() {
+        if pending_interests.len() < MIN_AGGREGATE_INTERESTS {
             return vec![Action::Wait];
         }
         vec![Action::CreateAggregateProposal(pending_interests)]
