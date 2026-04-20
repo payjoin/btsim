@@ -175,7 +175,7 @@ mod tests {
         ) -> TxData {
             let default_scorer = CompositeScorer {
                 fee_savings_weight: 0.0,
-                privacy_weight: 0.0,
+                privacy_bundle: crate::metrics::PrivacyBundle::default(),
                 payment_obligation_weight: 0.0,
                 coordination_weight: 0.0,
                 min_fallback_plans: 0,
@@ -234,7 +234,7 @@ mod tests {
         ) {
             let default_scorer = CompositeScorer {
                 fee_savings_weight: 0.0,
-                privacy_weight: 0.0,
+                privacy_bundle: crate::metrics::PrivacyBundle::default(),
                 payment_obligation_weight: 0.0,
                 coordination_weight: 0.0,
                 min_fallback_plans: 0,

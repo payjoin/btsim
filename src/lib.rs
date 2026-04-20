@@ -45,6 +45,7 @@ mod cospend;
 mod economic_graph;
 mod graphviz;
 mod message;
+pub mod metrics;
 pub mod script_type;
 mod transaction;
 mod tx_contruction;
@@ -247,7 +248,7 @@ impl SimulationBuilder {
         for wallet_type in &self.wallet_types {
             let scorer = CompositeScorer {
                 fee_savings_weight: wallet_type.scorer.fee_savings_weight,
-                privacy_weight: wallet_type.scorer.privacy_weight,
+                privacy_bundle: crate::metrics::PrivacyBundle::default(),
                 payment_obligation_weight: wallet_type.scorer.payment_obligation_weight,
                 coordination_weight: wallet_type.scorer.coordination_weight,
                 min_fallback_plans: wallet_type.scorer.min_fallback_plans,
@@ -1045,7 +1046,7 @@ mod tests {
         use crate::actions::{create_strategy, CompositeScorer};
         let default_scorer = CompositeScorer {
             fee_savings_weight: 1.0,
-            privacy_weight: 2.0,
+            privacy_bundle: crate::metrics::PrivacyBundle::default(),
             payment_obligation_weight: 1.0,
             coordination_weight: 0.0,
             min_fallback_plans: 0,
