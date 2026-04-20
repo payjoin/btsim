@@ -9,6 +9,7 @@ use crate::{
     coin_selection::{select_all, select_bnb},
     cospend::{CospendInterest, UtxoWithMetadata},
     message::MessageId,
+    metrics::PrivacyBundle,
     transaction::Outpoint,
     tx_contruction::TxConstructionState,
     wallet::{AddressId, PaymentObligationData, PaymentObligationId, WalletHandle},
@@ -76,11 +77,11 @@ pub(crate) struct WalletResidue {
 #[derive(Debug, Clone)]
 pub(crate) struct Plan {
     #[allow(dead_code)]
-    pub(crate) my_inputs: Vec<Outpoint>,
+    pub(crate) my_inputs: Vec<(Outpoint, Amount)>,
     #[allow(dead_code)]
     pub(crate) my_outputs: Vec<Amount>,
     #[allow(dead_code)]
-    pub(crate) their_inputs: Vec<Outpoint>,
+    pub(crate) their_inputs: Vec<(Outpoint, Amount)>,
     #[allow(dead_code)]
     pub(crate) their_outputs: Vec<Amount>,
     /// Unspent UTXOs and unhandled POs after this plan executes
@@ -139,7 +140,10 @@ fn plan_from_action(action: &Action, wallet: &WalletHandle) -> Plan {
         Action::UnilateralPayments(po_ids, inputs, change) => {
             let handled: std::collections::HashSet<_> = po_ids.iter().cloned().collect();
             Plan {
-                my_inputs: inputs.clone(),
+                my_inputs: inputs
+                    .iter()
+                    .map(|op| (*op, op.with(wallet.sim).data().amount))
+                    .collect(),
                 my_outputs: change.clone(),
                 their_inputs: vec![],
                 their_outputs: all_pos
@@ -163,15 +167,21 @@ fn plan_from_action(action: &Action, wallet: &WalletHandle) -> Plan {
                 .active_multi_party_payjoins
                 .get(bb_id)
                 .expect("session must exist when contributing outputs");
-            let my_inputs: Vec<Outpoint> = session.inputs.iter().map(|i| i.outpoint).collect();
+            let my_outpoints: Vec<Outpoint> = session.inputs.iter().map(|i| i.outpoint).collect();
+            let my_inputs: Vec<(Outpoint, Amount)> = my_outpoints
+                .iter()
+                .map(|op| (*op, op.with(wallet.sim).data().amount))
+                .collect();
             let messages = wallet.sim.bulletin_boards[bb_id.0].messages.clone();
             let handled: std::collections::HashSet<_> = po_ids.iter().cloned().collect();
             Plan {
                 their_inputs: messages
                     .iter()
                     .filter_map(|m| match m {
-                        BroadcastMessageType::ContributeInputs(op) if !my_inputs.contains(op) => {
-                            Some(*op)
+                        BroadcastMessageType::ContributeInputs(op)
+                            if !my_outpoints.contains(op) =>
+                        {
+                            Some((*op, op.with(wallet.sim).data().amount))
                         }
                         _ => None,
                     })
@@ -209,7 +219,7 @@ fn plan_from_action(action: &Action, wallet: &WalletHandle) -> Plan {
                     .iter()
                     .filter_map(|m| match m {
                         BroadcastMessageType::ContributeInputs(op) if my_confirmed.contains(op) => {
-                            Some(*op)
+                            Some((*op, op.with(wallet.sim).data().amount))
                         }
                         _ => None,
                     })
@@ -231,7 +241,7 @@ fn plan_from_action(action: &Action, wallet: &WalletHandle) -> Plan {
                         BroadcastMessageType::ContributeInputs(op)
                             if !my_confirmed.contains(op) =>
                         {
-                            Some(*op)
+                            Some((*op, op.with(wallet.sim).data().amount))
                         }
                         _ => None,
                     })
@@ -279,7 +289,7 @@ pub(crate) trait Strategy: std::fmt::Debug {
 
 #[derive(Debug, Clone, PartialEq)]
 // TODO: this should just be bitcoin::Amount
-pub(crate) struct ActionCost(f64);
+pub(crate) struct ActionCost(pub(crate) f64);
 
 // Flat base cost applied to any action, including waiting.
 const INHERENT_ACTION_COST: f64 = 0.0;
@@ -599,9 +609,9 @@ impl Strategy for MultipartyStrategy {
                             .filter(|peer_utxo| peer_utxo.owner != wallet.id)
                             .filter(|peer_utxo| {
                                 let plan = Plan {
-                                    my_inputs: vec![own_utxo.outpoint],
+                                    my_inputs: vec![(own_utxo.outpoint, own_utxo.amount)],
                                     my_outputs: vec![],
-                                    their_inputs: vec![peer_utxo.outpoint],
+                                    their_inputs: vec![(peer_utxo.outpoint, peer_utxo.amount)],
                                     their_outputs: vec![],
                                     wallet_residue: WalletResidue {
                                         utxos: wallet.spendable_utxos(),
@@ -678,12 +688,12 @@ impl Clone for Box<dyn Strategy> {
 }
 
 // TODO: this should be a trait once we have different scoring strategies
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompositeScorer {
     /// Weight applied to fee savings in sats
     pub(crate) fee_savings_weight: f64,
-    /// Weight applied to privacy utility
-    pub(crate) privacy_weight: f64,
+    /// Privacy metric bundle evaluated against a shared budget
+    pub(crate) privacy_bundle: PrivacyBundle,
     /// Weight applied to deadline urgency for payment obligations
     pub(crate) payment_obligation_weight: f64,
     /// Weight applied to multi-party coordination value
@@ -729,15 +739,7 @@ impl CompositeScorer {
             cost = cost + ActionCost(base_cost - utility);
         }
 
-        // TODO: replace 0.5 / 1.0 with data-driven coefficients from input/output graph analysis.
-        let privacy_cost = if plan.their_inputs.is_empty() {
-            // Unilateral
-            self.privacy_weight
-        } else {
-            // Cospend: on-chain ambiguity provides privacy; counterparty risk scales with mode.
-            self.privacy_weight * mode.external * 0.5
-        };
-        cost = cost + ActionCost(privacy_cost);
+        cost = cost + self.privacy_bundle.evaluate(plan, mode);
         // TODO: internal privacy penalty (change linkability, UTXO fragmentation, address reuse)
         // cost = cost + ActionCost(self.privacy_weight * mode.internal * internal_delta);
 
