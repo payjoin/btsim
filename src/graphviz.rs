@@ -7,7 +7,10 @@ use graphviz_rust::{
 };
 use im::OrdSet;
 
-use crate::{transaction::TxHandle, Simulation};
+use crate::{transaction::TxHandle, wallet::AddressId, Simulation};
+
+/// The simulation always reserves the first address as the miner address
+const MINER_ADDRESS: AddressId = AddressId(0);
 
 // TODO make overridable? builder pattern?
 pub fn new(name: &str) -> Graph {
@@ -47,20 +50,34 @@ pub fn new(name: &str) -> Graph {
 }
 
 impl Simulation {
+    fn is_miner_reward_tx(&self, tx_id: crate::transaction::TxId) -> bool {
+        let tx = tx_id.with(self);
+        tx.is_coinbase()
+            && tx.outputs().all(|o| o.data().address_id == MINER_ADDRESS)
+            && tx.outputs().next().is_some()
+    }
+
     pub fn draw_tx_graph(&self) -> Graph {
         let mut graph = new("tx_graph");
+
+        let hidden_txs: OrdSet<crate::transaction::TxId> = (0..self.tx_data.len())
+            .map(crate::transaction::TxId)
+            .filter(|&id| self.is_miner_reward_tx(id))
+            .collect();
 
         let txs = self
             .tx_data
             .iter()
             .enumerate()
-            .map(|(i, _)| crate::transaction::TxId(i));
+            .map(|(i, _)| crate::transaction::TxId(i))
+            .filter(|id| !hidden_txs.contains(id));
         let mut txs: OrdSet<crate::transaction::TxId> = txs.into_iter().collect();
         if txs.is_empty() {
             // TODO default to broadcast txs, not all created txs?
             // 1.. to skip genesis coinbase
             txs = (1..self.tx_data.len())
                 .map(crate::transaction::TxId)
+                .filter(|id| !hidden_txs.contains(id))
                 .collect();
         }
 
@@ -69,8 +86,16 @@ impl Simulation {
         }
 
         for (txo, spending_inputs) in &self.spends {
+            // Skip edges originating from hidden miner-reward transactions so
+            // miner UTXOs don't appear as dangling dashed stubs.
+            if hidden_txs.contains(&txo.txid) {
+                continue;
+            }
             let txo_id = format!("tx_{}_output_{}", txo.txid.0, txo.index);
             for txin in spending_inputs {
+                if hidden_txs.contains(&txin.txid) {
+                    continue;
+                }
                 let txo_included = txs.contains(&txo.txid);
                 let txin_included = txs.contains(&txin.txid);
                 if txo_included || txin_included {
