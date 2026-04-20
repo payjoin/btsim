@@ -979,6 +979,51 @@ mod tests {
     }
 
     #[test]
+    fn test_cospend_universe() {
+        use crate::config::{ScorerConfig, WalletTypeConfig};
+        let wallet_types = vec![
+            WalletTypeConfig {
+                name: "participant".to_string(),
+                count: 4,
+                strategies: vec!["MultipartyStrategy".to_string()],
+                scorer: ScorerConfig {
+                    fee_savings_weight: 1.0,
+                    privacy_weight: 1.0,
+                    payment_obligation_weight: 2.0,
+                    coordination_weight: 1.0,
+                    min_fallback_plans: 0,
+                },
+                script_type: ScriptType::P2wpkh,
+            },
+            WalletTypeConfig {
+                name: "aggregator".to_string(),
+                count: 1,
+                strategies: vec!["AggregatorStrategy".to_string()],
+                scorer: ScorerConfig {
+                    fee_savings_weight: 0.0,
+                    privacy_weight: 0.0,
+                    payment_obligation_weight: 0.0,
+                    coordination_weight: 0.0,
+                    min_fallback_plans: 0,
+                },
+                script_type: ScriptType::P2wpkh,
+            },
+        ];
+        let mut sim = SimulationBuilder::new(42, wallet_types, 15, 1, 5).build();
+        sim.assert_invariants();
+        sim.build_universe();
+        let result = sim.run();
+        sim.assert_invariants();
+
+        println!("result: {:?}", result.total_payment_obligations());
+
+        assert!(
+            result.total_payment_obligations() > 0,
+            "Simulation should create payment obligations"
+        );
+    }
+
+    #[test]
     fn it_works() {
         use crate::config::{ScorerConfig, WalletTypeConfig};
         let wallet_types = vec![WalletTypeConfig {
