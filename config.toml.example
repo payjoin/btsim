@@ -9,7 +9,5 @@ count = 3
 script_type = "p2tr"
 strategies = ["UnilateralSpender", "BatchSpender"]
 [wallet_types.scorer]
-fee_savings_weight = 1.0
 privacy_weight = 2.0
 payment_obligation_weight = 1.0
-coordination_weight = 0.0

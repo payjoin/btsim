@@ -28,14 +28,10 @@ pub struct WalletTypeConfig {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ScorerConfig {
-    /// Weight applied to fee savings in sats
-    pub fee_savings_weight: f64,
     /// Weight applied to privacy score
     pub privacy_weight: f64,
     /// Weight applied to deadline urgency for payment obligations
     pub payment_obligation_weight: f64,
-    /// Weight applied to multi-party coordination value
-    pub coordination_weight: f64,
     /// Minimum number of viable unilateral fallback plans required before committing to a
     /// multiparty session. 0 = no restriction (default).
     #[serde(default)]
