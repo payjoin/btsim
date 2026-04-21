@@ -247,10 +247,8 @@ impl SimulationBuilder {
         // Create wallets according to their type configurations
         for wallet_type in &self.wallet_types {
             let scorer = CompositeScorer {
-                fee_savings_weight: wallet_type.scorer.fee_savings_weight,
                 privacy_bundle: crate::metrics::PrivacyBundle::default(),
                 payment_obligation_weight: wallet_type.scorer.payment_obligation_weight,
-                coordination_weight: wallet_type.scorer.coordination_weight,
                 min_fallback_plans: wallet_type.scorer.min_fallback_plans,
             };
 
@@ -944,10 +942,8 @@ mod tests {
             count: 5,
             strategies: vec!["UnilateralSpender".to_string()],
             scorer: ScorerConfig {
-                fee_savings_weight: 1.0,
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
-                coordination_weight: 0.0,
                 min_fallback_plans: 0,
             },
             script_type: ScriptType::P2tr,
@@ -988,10 +984,8 @@ mod tests {
                 count: 4,
                 strategies: vec!["MultipartyStrategy".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 1.0,
                     privacy_weight: 1.0,
                     payment_obligation_weight: 2.0,
-                    coordination_weight: 1.0,
                     min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2wpkh,
@@ -1001,10 +995,8 @@ mod tests {
                 count: 1,
                 strategies: vec!["AggregatorStrategy".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 0.0,
                     privacy_weight: 0.0,
                     payment_obligation_weight: 0.0,
-                    coordination_weight: 0.0,
                     min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2wpkh,
@@ -1032,10 +1024,8 @@ mod tests {
             count: 2,
             strategies: vec!["UnilateralSpender".to_string(), "BatchSpender".to_string()],
             scorer: ScorerConfig {
-                fee_savings_weight: 1.0,
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
-                coordination_weight: 0.0,
                 min_fallback_plans: 0,
             },
             script_type: ScriptType::P2tr,
@@ -1045,10 +1035,8 @@ mod tests {
 
         use crate::actions::{create_strategy, CompositeScorer};
         let default_scorer = CompositeScorer {
-            fee_savings_weight: 1.0,
             privacy_bundle: crate::metrics::PrivacyBundle::default(),
             payment_obligation_weight: 1.0,
-            coordination_weight: 0.0,
             min_fallback_plans: 0,
         };
         let alice_strategies = vec![
@@ -1243,10 +1231,8 @@ mod tests {
                 count: 2,
                 strategies: vec!["UnilateralSpender".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 1.0,
                     privacy_weight: 2.0,
                     payment_obligation_weight: 1.0,
-                    coordination_weight: 0.0,
                     min_fallback_plans: 0,
                 },
                 script_type,
@@ -1303,10 +1289,8 @@ mod tests {
                 count: 1,
                 strategies: vec!["Consolidator".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 0.0,
                     privacy_weight: 0.0,
                     payment_obligation_weight: 1.0,
-                    coordination_weight: 0.0,
                     min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2tr,
@@ -1316,10 +1300,8 @@ mod tests {
                 count: 1,
                 strategies: vec!["UnilateralSpender".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 0.0,
                     privacy_weight: 0.0,
                     payment_obligation_weight: 1.0,
-                    coordination_weight: 0.0,
                     min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2tr,

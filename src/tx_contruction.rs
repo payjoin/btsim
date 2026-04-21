@@ -155,10 +155,8 @@ mod tests {
                 count: num_wallets,
                 strategies: vec!["UnilateralSpender".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 0.0,
                     privacy_weight: 0.0,
                     payment_obligation_weight: 0.0,
-                    coordination_weight: 0.0,
                     min_fallback_plans: 0,
                 },
                 script_type: crate::script_type::ScriptType::P2tr,
@@ -174,10 +172,8 @@ mod tests {
             num_outputs: usize,
         ) -> TxData {
             let default_scorer = CompositeScorer {
-                fee_savings_weight: 0.0,
                 privacy_bundle: crate::metrics::PrivacyBundle::default(),
                 payment_obligation_weight: 0.0,
-                coordination_weight: 0.0,
                 min_fallback_plans: 0,
             };
             let wallet = sim.new_wallet(
@@ -233,10 +229,8 @@ mod tests {
             num_outputs: usize,
         ) {
             let default_scorer = CompositeScorer {
-                fee_savings_weight: 0.0,
                 privacy_bundle: crate::metrics::PrivacyBundle::default(),
                 payment_obligation_weight: 0.0,
-                coordination_weight: 0.0,
                 min_fallback_plans: 0,
             };
             let wallet = sim.new_wallet(

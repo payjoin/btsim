@@ -448,7 +448,6 @@ pub(crate) struct Consolidator;
 
 impl Strategy for Consolidator {
     /// Always uses spend-all when paying — forces consolidation regardless of fee efficiency.
-    /// Fee savings from reducing UTXO fragmentation are captured when fee_savings_weight > 0.
     fn enumerate_candidate_actions(&self, wallet: &WalletHandle) -> Vec<Action> {
         let candidates = wallet.coin_candidates();
         let mut actions = Vec::new();
@@ -690,14 +689,10 @@ impl Clone for Box<dyn Strategy> {
 // TODO: this should be a trait once we have different scoring strategies
 #[derive(Debug, Clone)]
 pub(crate) struct CompositeScorer {
-    /// Weight applied to fee savings in sats
-    pub(crate) fee_savings_weight: f64,
     /// Privacy metric bundle evaluated against a shared budget
     pub(crate) privacy_bundle: PrivacyBundle,
     /// Weight applied to deadline urgency for payment obligations
     pub(crate) payment_obligation_weight: f64,
-    /// Weight applied to multi-party coordination value
-    pub(crate) coordination_weight: f64,
     /// Minimum number of viable unilateral fallback plans required before committing to a
     /// multiparty session. 0 = no restriction.
     pub(crate) min_fallback_plans: usize,
@@ -801,10 +796,8 @@ mod tests {
                 count: 2,
                 strategies: vec!["UnilateralSpender".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 0.0,
                     privacy_weight: 0.0,
                     payment_obligation_weight: 0.0,
-                    coordination_weight: 0.0,
                     min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2tr,
