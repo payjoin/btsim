@@ -1,9 +1,9 @@
 use crate::{
-    actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
+    actions::{Action, CompositeScorer, CompositeStrategy},
     blocks::BroadcastSetId,
     bulletin_board::BulletinBoardId,
     coin_selection::CoinCandidate,
-    cospend::UtxoWithMetadata,
+    cospend::{CospendInterest, UtxoWithMetadata},
     message::{MessageId, MessageType},
     script_type::ScriptType,
     tx_contruction::{MultiPartyPayjoinSession, SentOutputs, SentReadyToSign, TxConstructionState},
@@ -116,6 +116,81 @@ impl<'a> WalletHandle<'a> {
         self.potentially_spendable_txos()
             .filter(|o| self.info().unconfirmed_spends.contains(&o.outpoint()))
     }
+
+    pub(crate) fn unhandled_payment_obligations(&self) -> Vec<PaymentObligationData> {
+        let wallet_info = self.info();
+        wallet_info
+            .payment_obligations
+            .clone()
+            .iter()
+            .filter(|po_id| !wallet_info.handled_payment_obligations.contains(po_id))
+            // Do not offer paying again while a tx for this PO is already in the mempool;
+            // handled_payment_obligations only updates on confirm, so without this the wallet
+            // could build another tx reusing the same inputs (double-spend in `spends`).
+            .filter(|po_id| {
+                !wallet_info
+                    .txid_to_payment_obligation_ids
+                    .iter()
+                    .any(|(txid, po_ids)| {
+                        wallet_info.unconfirmed_transactions.contains(txid)
+                            && po_ids.contains(po_id)
+                    })
+            })
+            // Filter out POs that are not revealed yet
+            .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
+            .map(|po| po.with(self.sim).data().clone())
+            .collect()
+    }
+
+    pub(crate) fn pending_cospend_proposals(&self) -> Vec<(BulletinBoardId, MessageId)> {
+        self.sim
+            .messages
+            .iter()
+            .filter(|message| !self.data().messages_processed.contains(&message.id))
+            .filter(|message| message.from != self.id && message.to == self.id)
+            .filter_map(|message| match &message.message {
+                MessageType::ProposeCoSpend(bulletin_board_id) => {
+                    Some((*bulletin_board_id, message.id))
+                }
+                MessageType::RegisterWalletInput(_) => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn active_cospend_sessions(&self) -> Vec<BulletinBoardId> {
+        self.info()
+            .active_multi_party_payjoins
+            .iter()
+            .filter_map(|(bulletin_board_id, session)| match &session.state {
+                TxConstructionState::SentOutputs | TxConstructionState::SentReadyToSign => {
+                    Some(*bulletin_board_id)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn spendable_utxos(&self) -> Vec<UtxoWithMetadata> {
+        self.unspent_coins()
+            .map(|o| UtxoWithMetadata {
+                outpoint: o.outpoint(),
+                amount: o.data().amount,
+                owner: self.id,
+            })
+            .collect()
+    }
+
+    pub(crate) fn registered_input_outpoints(&self) -> Vec<Outpoint> {
+        self.info().registered_inputs.iter().cloned().collect()
+    }
+
+    pub(crate) fn orderbook_utxos(&self) -> Vec<UtxoWithMetadata> {
+        self.sim.get_orderbook_utxos()
+    }
+
+    pub(crate) fn pending_interests(&self) -> Vec<CospendInterest> {
+        self.sim.cospend_interests.clone()
+    }
 }
 
 impl<'a> WalletHandleMut<'a> {
@@ -128,6 +203,7 @@ impl<'a> WalletHandleMut<'a> {
         &mut self.sim.wallet_info[last_wallet_info_id.0]
     }
 
+    #[allow(dead_code)]
     pub(crate) fn handle(&self) -> WalletHandle<'_> {
         WalletHandle {
             sim: self.sim,
@@ -235,89 +311,6 @@ impl<'a> WalletHandleMut<'a> {
                 log::info!("Multi party payjoin session successful: {:?}", tx_id);
             }
         }
-    }
-
-    pub(crate) fn wallet_view(&self) -> WalletView {
-        let messages = self
-            .sim
-            .messages
-            .iter()
-            .filter(|message| !self.data().messages_processed.contains(&message.id))
-            .filter(|message| message.from != self.id && message.to == self.id)
-            .cloned()
-            .collect::<Vec<_>>();
-        let wallet_info = self.info();
-        // New cospend proposals
-        let new_cospend_proposals = messages
-            .iter()
-            .filter_map(|message| match &message.message {
-                MessageType::ProposeCoSpend(bulletin_board_id) => {
-                    Some((*bulletin_board_id, message.id))
-                }
-                MessageType::RegisterWalletInput(_) => None,
-            })
-            .collect::<Vec<_>>();
-        // Already active multi party payjoin sessions (AcceptedProposal handled via ContributeOutputsToSession)
-        let active_mp_pj_sessions = wallet_info
-            .active_multi_party_payjoins
-            .iter()
-            .filter_map(|(bulletin_board_id, session)| match &session.state {
-                TxConstructionState::SentOutputs | TxConstructionState::SentReadyToSign => {
-                    Some(*bulletin_board_id)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        let payment_obligations = wallet_info
-            .payment_obligations
-            .clone()
-            .iter()
-            .filter(|po_id| !wallet_info.handled_payment_obligations.contains(po_id))
-            // Do not offer paying again while a tx for this PO is already in the mempool;
-            // handled_payment_obligations only updates on confirm, so without this the wallet
-            // could build another tx reusing the same inputs (double-spend in `spends`).
-            .filter(|po_id| {
-                !wallet_info
-                    .txid_to_payment_obligation_ids
-                    .iter()
-                    .any(|(txid, po_ids)| {
-                        wallet_info.unconfirmed_transactions.contains(txid)
-                            && po_ids.contains(po_id)
-                    })
-            })
-            // Filter out POs that are not revealed yet
-            .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
-            .map(|po| po.with(self.sim).data().clone())
-            .collect::<Vec<_>>();
-
-        let utxos = self
-            .handle()
-            .unspent_coins()
-            .map(|o| UtxoWithMetadata {
-                outpoint: o.outpoint(),
-                amount: o.data().amount,
-                owner: self.id,
-            })
-            .collect::<Vec<_>>();
-        let registered_inputs = self
-            .info()
-            .registered_inputs
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let orderbook_utxos = self.sim.get_orderbook_utxos();
-        let pending_interests = self.sim.cospend_interests.clone();
-
-        WalletView::new(
-            payment_obligations,
-            new_cospend_proposals,
-            active_mp_pj_sessions,
-            utxos,
-            registered_inputs,
-            orderbook_utxos,
-            pending_interests,
-        )
     }
 
     fn register_input(&mut self, outpoint: &Outpoint) {
@@ -465,14 +458,13 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     pub(crate) fn wake_up(&'a mut self) {
-        let scorer = &self.data().scorer;
-        let wallet_view = self.wallet_view();
+        let scorer = self.data().scorer.clone();
         // Clone strategies to allow passing &self to enumerate_candidate_actions
         // without conflicting with the borrow on strategies.strategies
         let strategies = self.data().strategies.clone();
         let mut all_actions = Vec::new();
         for strategy in strategies.strategies.iter() {
-            all_actions.extend(strategy.enumerate_candidate_actions(&wallet_view, self));
+            all_actions.extend(strategy.enumerate_candidate_actions(self));
         }
 
         let action = all_actions
