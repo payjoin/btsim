@@ -3,31 +3,16 @@ seed = 42
 max_timestep = 15
 num_payment_obligations = 5
 
-# Takers: have payment obligations, build cospend proposals using the order book
+# Multiparty participants: register UTXOs, propose and accept cospends, contribute outputs
 [[wallet_types]]
-name = "taker"
-count = 1
-strategies = ["TakerStrategy"]
+name = "participant"
+count = 4
+strategies = ["MultipartyStrategy"]
 script_type = "p2wpkh"
 
 [wallet_types.scorer]
-fee_savings_weight = 1.0
 privacy_weight = 1.0
 payment_obligation_weight = 2.0
-coordination_weight = 1.0
-
-# Makers: register UTXOs in the order book and participate in cospends
-[[wallet_types]]
-name = "maker"
-count = 3
-strategies = ["MakerStrategy"]
-script_type = "p2wpkh"
-
-[wallet_types.scorer]
-fee_savings_weight = 0.5
-privacy_weight = 1.0
-payment_obligation_weight = 1.0
-coordination_weight = 2.0
 
 # Aggregators: create aggregate proposals from pending interests
 # For now they are a distinct role that should not have payment obligations
@@ -38,7 +23,5 @@ strategies = ["AggregatorStrategy"]
 script_type = "p2wpkh"
 
 [wallet_types.scorer]
-fee_savings_weight = 0.0
 privacy_weight = 0.0
 payment_obligation_weight = 0.0
-coordination_weight = 0.0
