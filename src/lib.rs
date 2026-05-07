@@ -45,6 +45,7 @@ mod cospend;
 mod economic_graph;
 mod graphviz;
 mod message;
+pub mod metrics;
 pub mod script_type;
 mod transaction;
 mod tx_contruction;
@@ -246,10 +247,9 @@ impl SimulationBuilder {
         // Create wallets according to their type configurations
         for wallet_type in &self.wallet_types {
             let scorer = CompositeScorer {
-                fee_savings_weight: wallet_type.scorer.fee_savings_weight,
-                privacy_weight: wallet_type.scorer.privacy_weight,
+                privacy_bundle: crate::metrics::PrivacyBundle::default(),
                 payment_obligation_weight: wallet_type.scorer.payment_obligation_weight,
-                coordination_weight: wallet_type.scorer.coordination_weight,
+                min_fallback_plans: wallet_type.scorer.min_fallback_plans,
             };
 
             for _ in 0..wallet_type.count {
@@ -942,10 +942,9 @@ mod tests {
             count: 5,
             strategies: vec!["UnilateralSpender".to_string()],
             scorer: ScorerConfig {
-                fee_savings_weight: 1.0,
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
-                coordination_weight: 0.0,
+                min_fallback_plans: 0,
             },
             script_type: ScriptType::P2tr,
         }];
@@ -977,6 +976,47 @@ mod tests {
     }
 
     #[test]
+    fn test_cospend_universe() {
+        use crate::config::{ScorerConfig, WalletTypeConfig};
+        let wallet_types = vec![
+            WalletTypeConfig {
+                name: "participant".to_string(),
+                count: 4,
+                strategies: vec!["MultipartyStrategy".to_string()],
+                scorer: ScorerConfig {
+                    privacy_weight: 1.0,
+                    payment_obligation_weight: 2.0,
+                    min_fallback_plans: 0,
+                },
+                script_type: ScriptType::P2wpkh,
+            },
+            WalletTypeConfig {
+                name: "aggregator".to_string(),
+                count: 1,
+                strategies: vec!["AggregatorStrategy".to_string()],
+                scorer: ScorerConfig {
+                    privacy_weight: 0.0,
+                    payment_obligation_weight: 0.0,
+                    min_fallback_plans: 0,
+                },
+                script_type: ScriptType::P2wpkh,
+            },
+        ];
+        let mut sim = SimulationBuilder::new(42, wallet_types, 15, 1, 5).build();
+        sim.assert_invariants();
+        sim.build_universe();
+        let result = sim.run();
+        sim.assert_invariants();
+
+        println!("result: {:?}", result.total_payment_obligations());
+
+        assert!(
+            result.total_payment_obligations() > 0,
+            "Simulation should create payment obligations"
+        );
+    }
+
+    #[test]
     fn it_works() {
         use crate::config::{ScorerConfig, WalletTypeConfig};
         let wallet_types = vec![WalletTypeConfig {
@@ -984,10 +1024,9 @@ mod tests {
             count: 2,
             strategies: vec!["UnilateralSpender".to_string(), "BatchSpender".to_string()],
             scorer: ScorerConfig {
-                fee_savings_weight: 1.0,
                 privacy_weight: 2.0,
                 payment_obligation_weight: 1.0,
-                coordination_weight: 0.0,
+                min_fallback_plans: 0,
             },
             script_type: ScriptType::P2tr,
         }];
@@ -996,10 +1035,9 @@ mod tests {
 
         use crate::actions::{create_strategy, CompositeScorer};
         let default_scorer = CompositeScorer {
-            fee_savings_weight: 1.0,
-            privacy_weight: 2.0,
+            privacy_bundle: crate::metrics::PrivacyBundle::default(),
             payment_obligation_weight: 1.0,
-            coordination_weight: 0.0,
+            min_fallback_plans: 0,
         };
         let alice_strategies = vec![
             create_strategy("UnilateralSpender").unwrap(),
@@ -1193,10 +1231,9 @@ mod tests {
                 count: 2,
                 strategies: vec!["UnilateralSpender".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 1.0,
                     privacy_weight: 2.0,
                     payment_obligation_weight: 1.0,
-                    coordination_weight: 0.0,
+                    min_fallback_plans: 0,
                 },
                 script_type,
             }];
@@ -1252,10 +1289,9 @@ mod tests {
                 count: 1,
                 strategies: vec!["Consolidator".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 0.0,
                     privacy_weight: 0.0,
                     payment_obligation_weight: 1.0,
-                    coordination_weight: 0.0,
+                    min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2tr,
             },
@@ -1264,10 +1300,9 @@ mod tests {
                 count: 1,
                 strategies: vec!["UnilateralSpender".to_string()],
                 scorer: ScorerConfig {
-                    fee_savings_weight: 0.0,
                     privacy_weight: 0.0,
                     payment_obligation_weight: 1.0,
-                    coordination_weight: 0.0,
+                    min_fallback_plans: 0,
                 },
                 script_type: ScriptType::P2tr,
             },
