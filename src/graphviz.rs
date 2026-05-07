@@ -103,18 +103,16 @@ impl Simulation {
 
                     if txo_included && txin_included {
                         graph.add_stmt(stmt!(edge!(node_id!(txo_id) => node_id!(txin_id))));
-                    } else {
-                        if !txo_included {
-                            graph.add_stmt(stmt!(edge!(node_id!(txo_id) => node_id!(txin_id); attr!("style", "dashed"))));
-                            graph.add_stmt(stmt!(
-                                node!(txo_id; attr!("style", "invis"), attr!("shape", "point"))
-                            ));
-                        } else if !txin_included {
-                            graph.add_stmt(stmt!(edge!(node_id!(txo_id) => node_id!(txin_id); attr!("style", "dashed"), attr!("arrowhead", "none"))));
-                            graph.add_stmt(stmt!(
-                                node!(txin_id; attr!("style", "invis"), attr!("shape", "point"))
-                            ));
-                        }
+                    } else if !txo_included {
+                        graph.add_stmt(stmt!(edge!(node_id!(txo_id) => node_id!(txin_id); attr!("style", "dashed"))));
+                        graph.add_stmt(stmt!(
+                            node!(txo_id; attr!("style", "invis"), attr!("shape", "point"))
+                        ));
+                    } else if !txin_included {
+                        graph.add_stmt(stmt!(edge!(node_id!(txo_id) => node_id!(txin_id); attr!("style", "dashed"), attr!("arrowhead", "none"))));
+                        graph.add_stmt(stmt!(
+                            node!(txin_id; attr!("style", "invis"), attr!("shape", "point"))
+                        ));
                     }
                 }
             }
@@ -327,12 +325,10 @@ pub fn format_min_hamming_weight_sats(n: u64) -> String {
                 if value == n {
                     return if exponent == 0 {
                         format!("{}", factor)
+                    } else if factor == 1 {
+                        format!("10{}", unicode_exponent(exponent))
                     } else {
-                        if factor == 1 {
-                            format!("10{}", unicode_exponent(exponent))
-                        } else {
-                            format!("{}×10{}", factor, unicode_exponent(exponent))
-                        }
+                        format!("{}×10{}", factor, unicode_exponent(exponent))
                     };
                 }
                 value *= 10;
